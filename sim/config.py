@@ -18,6 +18,8 @@ HTTP_PORT = int(os.environ.get("SIM_PORT", "8000"))
 
 BRIDGE_HOST = os.environ.get("SIM_BRIDGE_HOST", "127.0.0.1")
 TCP_BASE = int(os.environ.get("SIM_TCP_BASE", "6000"))
+SHARED_PORT_BASE = int(os.environ.get("SIM_SHARED_PORT_BASE", "6200"))
+CONTROL_PORT_BASE = int(os.environ.get("SIM_CONTROL_PORT_BASE", "6400"))
 
 DEFAULT_MTU = 500
 DEFAULT_BITRATE = 9600

@@ -43,13 +43,21 @@ class NodeManager:
     def config_dir_for(self, node_id):
         return os.path.join(config.NODES_DIR, node_id)
 
-    def bridge_port(self, node_id):
+    def node_index(self, node_id):
         digits = "".join(ch for ch in node_id if ch.isdigit())
         try:
-            index = int(digits)
+            return int(digits)
         except Exception:
-            index = 0
-        return config.TCP_BASE + index
+            return 0
+
+    def bridge_port(self, node_id):
+        return config.TCP_BASE + self.node_index(node_id)
+
+    def shared_instance_port(self, node_id):
+        return config.SHARED_PORT_BASE + self.node_index(node_id)
+
+    def instance_control_port(self, node_id):
+        return config.CONTROL_PORT_BASE + self.node_index(node_id)
 
     def ensure_identity(self, node_id):
         cfg_dir = self.config_dir_for(node_id)
@@ -90,6 +98,8 @@ class NodeManager:
         lines.append("  enable_transport = " + ("yes" if transport else "no"))
         lines.append("  share_instance = yes")
         lines.append("  instance_name = " + config.INSTANCE_PREFIX + "-" + node_id)
+        lines.append("  shared_instance_port = " + str(self.shared_instance_port(node_id)))
+        lines.append("  instance_control_port = " + str(self.instance_control_port(node_id)))
         lines.append("  respond_to_probes = yes")
         lines.append("  panic_on_interface_error = no")
         lines.append("")
