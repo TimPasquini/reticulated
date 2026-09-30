@@ -160,7 +160,15 @@ class LiveRNSProvider:
         """Normalize RNS JSON without asserting topology RNS did not report."""
         transport_id = status.get("transport_id")
         root_id = f"instance:{transport_id}" if transport_id else "instance:local"
-        root = {"id": root_id, "label": label, "transport_id": transport_id}
+        root = {
+            "id": root_id,
+            "label": label,
+            "transport_id": transport_id,
+            # Preserve new RNS telemetry that the normalized schema does not
+            # understand yet, without duplicating the (potentially large)
+            # interface list on every node.
+            "raw": {key: value for key, value in status.items() if key != "interfaces"},
+        }
 
         interfaces: list[dict[str, Any]] = []
         interface_by_name: dict[str, dict[str, Any]] = {}
@@ -183,6 +191,7 @@ class LiveRNSProvider:
                 "rxb": raw.get("rxb"),
                 "txb": raw.get("txb"),
                 "path_only": False,
+                "raw": raw,
             }
             interfaces.append(item)
             interface_by_name[name] = item
@@ -218,6 +227,7 @@ class LiveRNSProvider:
                     "rxb": None,
                     "txb": None,
                     "path_only": True,
+                    "raw": {"name": interface_name, "source": "rnpath"},
                 }
                 interfaces.append(interface)
                 interface_by_name[interface_name] = interface
@@ -240,6 +250,7 @@ class LiveRNSProvider:
                 "interface": interface_name,
                 "timestamp": raw.get("timestamp"),
                 "expires": raw.get("expires"),
+                "raw": raw,
             }
             destinations[destination_id] = destination
 

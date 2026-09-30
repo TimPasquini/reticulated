@@ -63,5 +63,11 @@ the local instance, its interfaces, and reported next-hop transports. Dashed
 edges lead to known destinations and label any unresolved remaining hops; the
 application never fabricates intermediate routers. If either command fails,
 the API reports the error and retains the last good data from that source.
+Normalized objects also retain their raw `rnstatus` or `rnpath` fields so newer
+RNS telemetry can be adopted without another collector redesign.
+
+RNS 1.5.5 adds live interface attach, detach, and reload operations to
+`rnstatus`. Reticulated deliberately does not invoke or expose those operations;
+they are reserved for a separately designed, authenticated management mode.
 
 Each node's `instance_name` is derived from the data directory under simdata/

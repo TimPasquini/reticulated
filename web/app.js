@@ -37,6 +37,8 @@ function loraBitrate(sf, bw, cr) {
 const state = {
   uiMode: "simulation",
   live: null,
+  liveSlots: {},
+  liveNextSlot: {},
   topology: { nodes: {}, links: {} },
   addresses: {},
   addrToNode: {},
@@ -232,22 +234,87 @@ function liveEdgeLabel(edge) {
   return edge.hops === 1 ? "1 hop total" : edge.hops + " hops total";
 }
 
+function livePositions(snapshot) {
+  const positions = {};
+  positions[snapshot.root.id] = { x: 0, y: 0 };
+
+  const interfaces = snapshot.interfaces || [];
+  interfaces.forEach((item, index) => {
+    positions[item.id] = { x: (index - (interfaces.length - 1) / 2) * 220, y: 180 };
+  });
+
+  const pathEdges = (snapshot.edges || []).filter((edge) => edge.kind === "known_path");
+  const edgeByDestination = {};
+  pathEdges.forEach((edge) => { edgeByDestination[edge.target] = edge; });
+  const sources = Array.from(new Set(pathEdges.map((edge) => edge.source))).sort();
+
+  // Keep every destination's slot for the lifetime of the page. New paths are
+  // appended to a compact wrapped grid instead of reshuffling existing nodes.
+  // This makes a growing path table much less disorienting.
+  const liveDestinationIds = new Set((snapshot.destinations || []).map((item) => item.id));
+  Object.keys(state.liveSlots).forEach((id) => {
+    if (!liveDestinationIds.has(id)) delete state.liveSlots[id];
+  });
+
+  const columns = 18;
+  const columnSpacing = 104;
+  const rowSpacing = 68;
+  const groupSpacing = columns * columnSpacing + 140;
+  const sourceX = {};
+  sources.forEach((source, index) => {
+    sourceX[source] = (index - (sources.length - 1) / 2) * groupSpacing;
+    positions[source] = { x: sourceX[source], y: 360 };
+  });
+
+  for (const item of snapshot.destinations || []) {
+    const edge = edgeByDestination[item.id];
+    if (!edge) continue;
+    const source = edge.source;
+    let assignment = state.liveSlots[item.id];
+    if (!assignment || assignment.source !== source) {
+      const slot = state.liveNextSlot[source] || 0;
+      assignment = { source: source, slot: slot };
+      state.liveSlots[item.id] = assignment;
+      state.liveNextSlot[source] = slot + 1;
+    }
+    const column = assignment.slot % columns;
+    const row = Math.floor(assignment.slot / columns);
+    positions[item.id] = {
+      x: sourceX[source] + (column - (columns - 1) / 2) * columnSpacing,
+      y: 520 + row * rowSpacing,
+    };
+  }
+
+  // Next hops without destinations still belong near their first interface.
+  for (const item of snapshot.transports || []) {
+    if (positions[item.id]) continue;
+    const parent = positions[(item.interface_ids || [])[0]];
+    positions[item.id] = parent ? { x: parent.x, y: 360 } : { x: 0, y: 360 };
+  }
+  return positions;
+}
+
 function rebuildLive(snapshot) {
+  const hadLiveGraph = cy.nodes(".live-root").length > 0;
+  const oldPan = { ...cy.pan() };
+  const oldZoom = cy.zoom();
+  const selectedIds = cy.$(":selected").map((element) => element.id());
+  const positions = livePositions(snapshot);
   cy.elements().remove();
   const els = [];
   const root = snapshot.root;
-  els.push({ group: "nodes", data: { id: root.id, label: root.label, liveKind: "root", item: root }, classes: "live-root" });
+  els.push({ group: "nodes", data: { id: root.id, label: root.label, liveKind: "root", item: root }, classes: "live-root", position: positions[root.id] });
   for (const item of snapshot.interfaces || []) {
     let classes = "live-interface" + liveInterfaceClass(item);
     if (item.path_only) classes += " path-only";
-    els.push({ group: "nodes", data: { id: item.id, label: item.name, liveKind: "interface", item: item }, classes: classes });
+    els.push({ group: "nodes", data: { id: item.id, label: item.name, liveKind: "interface", item: item }, classes: classes, position: positions[item.id] });
   }
   for (const item of snapshot.transports || []) {
-    els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash), liveKind: "transport", item: item }, classes: "live-transport" });
+    els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash), liveKind: "transport", item: item }, classes: "live-transport", position: positions[item.id] });
   }
   for (const item of snapshot.destinations || []) {
     const hops = item.hops === null || item.hops === undefined ? "? hops" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
-    els.push({ group: "nodes", data: { id: item.id, label: shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination" });
+    els.push({ group: "nodes", data: { id: item.id, label: shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination", position: positions[item.id] });
   }
   for (const edge of snapshot.edges || []) {
     const incomplete = edge.certainty === "incomplete";
@@ -258,7 +325,19 @@ function rebuildLive(snapshot) {
     });
   }
   cy.add(els);
-  cy.layout({ name: "breadthfirst", directed: true, roots: cy.getElementById(root.id), spacingFactor: 1.15, padding: 45, animate: false }).run();
+  if (hadLiveGraph) {
+    cy.zoom(oldZoom);
+    cy.pan(oldPan);
+  } else {
+    cy.zoom(1);
+    cy.center(cy.getElementById(root.id));
+  }
+  let restoredSelection = null;
+  selectedIds.forEach((id) => {
+    const element = cy.getElementById(id);
+    if (element.nonempty()) { element.select(); restoredSelection = element; }
+  });
+  if (restoredSelection) showPanel(restoredSelection);
 }
 
 function updateLiveHealth(snapshot) {
@@ -1073,8 +1152,13 @@ setupHold(document.getElementById("btn-reset"), 3000, () => api.post("/api/reset
 function runLayout() {
   if (!cy.nodes().length) return;
   if (state.uiMode === "live") {
-    const roots = state.live && state.live.root ? cy.getElementById(state.live.root.id) : undefined;
-    cy.layout({ name: "breadthfirst", directed: true, roots: roots, spacingFactor: 1.15, padding: 45, animate: true, animationDuration: 500 }).run();
+    if (!state.live) return;
+    const positions = livePositions(state.live);
+    cy.nodes().forEach((node) => {
+      if (positions[node.id()]) node.position(positions[node.id()]);
+    });
+    cy.zoom(1);
+    cy.center(cy.getElementById(state.live.root.id));
     return;
   }
   const layout = cy.layout({

@@ -9,6 +9,7 @@ from sim.live_rns import LiveRNSProvider
 
 STATUS = {
     "transport_id": "0998543722d6e34f7c4a1d46b5352835",
+    "future_queue_metric": 0.25,
     "interfaces": [
         {
             "name": "BackboneInterface[NYC Backbone]",
@@ -21,6 +22,7 @@ STATUS = {
             "mtu": 500,
             "rxb": 120,
             "txb": 80,
+            "arbitrary_future_counter": 42,
         },
         {
             "name": "RNodeInterface[Patroon]",
@@ -43,6 +45,7 @@ PATHS = [
         "hops": 4,
         "expires": 2345,
         "interface": "BackboneInterface[NYC Backbone]",
+        "future_path_field": "retained",
     },
     {
         "hash": "destination-b",
@@ -62,6 +65,8 @@ class LiveRNSNormalizationTests(unittest.TestCase):
         self.assertEqual(state["root"]["id"], "instance:0998543722d6e34f7c4a1d46b5352835")
         self.assertEqual(len(state["interfaces"]), 2)
         self.assertEqual(state["interfaces"][0]["mode"], "boundary")
+        self.assertEqual(state["interfaces"][0]["raw"]["arbitrary_future_counter"], 42)
+        self.assertEqual(state["root"]["raw"]["future_queue_metric"], 0.25)
         self.assertEqual(len(state["transports"]), 1)
         self.assertEqual(len(state["destinations"]), 2)
         self.assertEqual(
@@ -77,6 +82,7 @@ class LiveRNSNormalizationTests(unittest.TestCase):
         self.assertEqual(direct["unknown_hops"], 0)
         self.assertEqual(direct["certainty"], "observed")
         self.assertFalse(any("intermediate" in node["id"] for node in state["transports"]))
+        self.assertEqual(state["destinations"][0]["raw"]["future_path_field"], "retained")
 
     def test_path_only_interface_is_explicitly_marked(self):
         paths = [{**PATHS[0], "interface": "I2PInterfacePeer[remote]"}]
