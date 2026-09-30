@@ -8,9 +8,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import config
+from .live_rns import LiveRNSProvider
 from .manager import Simulator
 
 sim = Simulator()
+live_rns = LiveRNSProvider()
 clients = set()
 clients_lock = asyncio.Lock()
 
@@ -129,13 +131,21 @@ async def status_pump():
             await broadcast({"type": "status", "nodes": data, "lxmf": sim.lxmf_map(), "media": sim.hub.snapshot()})
 
 
+async def live_rns_pump():
+    while True:
+        await asyncio.to_thread(live_rns.collect)
+        await asyncio.sleep(config.LIVE_RNS_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app):
     pump = asyncio.create_task(event_pump())
     poller = asyncio.create_task(status_pump())
+    live_poller = asyncio.create_task(live_rns_pump())
     yield
     pump.cancel()
     poller.cancel()
+    live_poller.cancel()
     sim.shutdown()
 
 
@@ -150,6 +160,12 @@ def get_state():
 @app.get("/api/status")
 async def get_status():
     return await asyncio.to_thread(sim.all_status)
+
+
+@app.get("/api/live/state")
+def get_live_state():
+    """Return the latest read-only view of the local shared RNS instance."""
+    return live_rns.snapshot()
 
 
 @app.get("/api/paths/{node_id}")

@@ -11,25 +11,27 @@
 <div id="app">
   <div id="toolbar">
     <span id="title">Reticulated</span>
-    <span id="sim-state" class="badge stopped">stopped</span>
-    <button id="btn-start">Start</button>
-    <button id="btn-stop">Stop</button>
-    <span class="sep"></span>
-    <button id="btn-add-node">Add Node</button>
-    <button id="btn-add-link" disabled>Add Link</button>
-    <button id="btn-delete">Delete Selected</button>
-    <span class="sep"></span>
-    <label id="show-addr-label"><input id="show-addr" type="checkbox"> Show addresses</label>
-    <button id="btn-options">Options</button>
-    <button id="btn-generate">Generate</button>
+    <span id="mode-switch"><button id="mode-simulation" class="active">Simulation</button><button id="mode-live">Live RNS</button></span>
+    <span id="sim-state" class="badge stopped sim-only">stopped</span>
+    <button id="btn-start" class="sim-only">Start</button>
+    <button id="btn-stop" class="sim-only">Stop</button>
+    <span class="sep sim-only"></span>
+    <button id="btn-add-node" class="sim-only">Add Node</button>
+    <button id="btn-add-link" class="sim-only" disabled>Add Link</button>
+    <button id="btn-delete" class="sim-only">Delete Selected</button>
+    <span class="sep sim-only"></span>
+    <label id="show-addr-label" class="sim-only"><input id="show-addr" type="checkbox"> Show addresses</label>
+    <button id="btn-options" class="sim-only">Options</button>
+    <button id="btn-generate" class="sim-only">Generate</button>
     <button id="btn-layout" class="hold-btn" title="Hold 2 seconds to lay out the graph"><span>Layout</span></button>
-    <span class="sep"></span>
-    <button id="btn-save">Save</button>
-    <button id="btn-load">Load</button>
+    <span class="sep sim-only"></span>
+    <button id="btn-save" class="sim-only">Save</button>
+    <button id="btn-load" class="sim-only">Load</button>
     <input id="file-load" type="file" accept="application/json,.json" style="display:none">
-    <span class="sep"></span>
-    <span id="hint">Click two nodes to then Add Link</span>
-    <button id="btn-reset" class="hold-btn" title="Hold 3 seconds to reset everything"><span>Hold to Reset</span></button>
+    <span class="sep sim-only"></span>
+    <span id="hint" class="sim-only">Click two nodes to then Add Link</span>
+    <span id="live-health" class="live-only">Waiting for live data…</span>
+    <button id="btn-reset" class="hold-btn sim-only" title="Hold 3 seconds to reset everything"><span>Hold to Reset</span></button>
   </div>
   <div id="main">
     <div id="cy"></div>
@@ -38,7 +40,7 @@
         <h3 id="panel-title">Details</h3>
         <div id="panel-body">Select a node or link.</div>
       </div>
-      <div id="traffic-box">
+      <div id="traffic-box" class="sim-only">
         <h3>Traffic</h3>
         <div class="row"><label>Source</label><span id="traffic-src">-</span></div>
         <div class="row"><label>Destination</label><span id="traffic-dst">-</span></div>
@@ -46,7 +48,7 @@
         <div class="row"><button id="btn-traffic" disabled>Send Resource</button><button id="btn-route" disabled>Trace Route</button></div>
         <div id="route-info" class="muted"></div>
       </div>
-      <div id="log-box">
+      <div id="log-box" class="sim-only">
         <div class="log-header">
           <h3>Events</h3>
           <span><label id="node-logs-label"><input id="show-node-logs" type="checkbox"> node logs</label> <button id="btn-clear-log">clear</button></span>

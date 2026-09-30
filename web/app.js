@@ -35,6 +35,8 @@ function loraBitrate(sf, bw, cr) {
 }
 
 const state = {
+  uiMode: "simulation",
+  live: null,
   topology: { nodes: {}, links: {} },
   addresses: {},
   addrToNode: {},
@@ -139,7 +141,37 @@ const cy = cytoscape({
       "border-width": 2, "border-color": "#11151c",
     }},
     { selector: "node.medium.announce-pulse", style: { "border-color": "#ffd34d", "border-width": 6 }},
+    { selector: "node.live-root", style: {
+      "shape": "diamond", "width": 62, "height": 62, "background-color": "#8b5cf6",
+      "label": "data(label)", "color": "#fff", "text-valign": "center", "text-halign": "center",
+      "font-size": 11, "text-wrap": "wrap", "text-max-width": 130, "text-outline-color": "#11151c", "text-outline-width": 2,
+    }},
+    { selector: "node.live-interface", style: {
+      "shape": "round-rectangle", "width": 126, "height": 42, "background-color": "#356b82",
+      "label": "data(label)", "color": "#eef8ff", "text-valign": "center", "text-halign": "center",
+      "font-size": 10, "text-wrap": "wrap", "text-max-width": 120, "border-width": 2, "border-color": "#5292ad",
+    }},
+    { selector: "node.live-interface.rf", style: { "background-color": "#725a24", "border-color": "#d1a83d" }},
+    { selector: "node.live-interface.i2p", style: { "background-color": "#66437a", "border-color": "#a46fc0" }},
+    { selector: "node.live-interface.backbone", style: { "background-color": "#285b78", "border-color": "#4fa3cf" }},
+    { selector: "node.live-interface.path-only", style: { "border-style": "dashed", "opacity": 0.75 }},
+    { selector: "node.live-transport", style: {
+      "shape": "hexagon", "width": 50, "height": 50, "background-color": "#3d7c59",
+      "label": "data(label)", "color": "#eaffef", "text-valign": "center", "text-halign": "center",
+      "font-size": 9, "text-wrap": "wrap", "text-max-width": 100, "text-outline-color": "#11151c", "text-outline-width": 2,
+    }},
+    { selector: "node.live-destination", style: {
+      "shape": "ellipse", "width": 34, "height": 34, "background-color": "#687386",
+      "label": "data(label)", "color": "#d7dde5", "text-valign": "bottom", "text-margin-y": 7,
+      "font-size": 9, "text-wrap": "wrap", "text-max-width": 90, "text-outline-color": "#11151c", "text-outline-width": 2,
+    }},
     { selector: "edge", style: { "width": 2, "line-color": "#46566b", "curve-style": "bezier" }},
+    { selector: "edge.live-observed", style: { "line-color": "#5b8196", "target-arrow-shape": "triangle", "target-arrow-color": "#5b8196", "arrow-scale": 0.7 }},
+    { selector: "edge.live-incomplete", style: {
+      "line-color": "#d89b45", "line-style": "dashed", "target-arrow-shape": "triangle", "target-arrow-color": "#d89b45",
+      "label": "data(label)", "font-size": 9, "color": "#e7b96b", "text-background-color": "#11151c", "text-background-opacity": 0.85,
+      "text-background-padding": 2, "curve-style": "bezier",
+    }},
     { selector: "edge.announce-flash", style: { "line-color": "#ffd34d", "width": 5 }},
     { selector: "edge.route", style: { "line-color": "#ff9d3c", "width": 5 }},
     { selector: "node.route", style: { "border-color": "#ff9d3c", "border-width": 5 }},
@@ -178,6 +210,133 @@ function rebuild() {
   cy.add(els);
   applyStatusClasses();
   applyPickClasses();
+}
+
+function shortHash(value) {
+  const text = String(value || "unknown");
+  return text.length > 12 ? text.slice(0, 12) + "…" : text;
+}
+
+function liveInterfaceClass(item) {
+  const descriptor = ((item.type || "") + " " + (item.name || "")).toLowerCase();
+  if (descriptor.indexOf("rnode") >= 0 || descriptor.indexOf("lora") >= 0) return " rf";
+  if (descriptor.indexOf("i2p") >= 0) return " i2p";
+  if (descriptor.indexOf("backbone") >= 0 || descriptor.indexOf("boundary") >= 0) return " backbone";
+  return "";
+}
+
+function liveEdgeLabel(edge) {
+  if (edge.kind !== "known_path") return "";
+  if (edge.hops === null || edge.hops === undefined) return "unknown path length";
+  if (edge.unknown_hops > 0) return "… " + edge.unknown_hops + " unknown hop" + (edge.unknown_hops === 1 ? "" : "s") + " …";
+  return edge.hops === 1 ? "1 hop total" : edge.hops + " hops total";
+}
+
+function rebuildLive(snapshot) {
+  cy.elements().remove();
+  const els = [];
+  const root = snapshot.root;
+  els.push({ group: "nodes", data: { id: root.id, label: root.label, liveKind: "root", item: root }, classes: "live-root" });
+  for (const item of snapshot.interfaces || []) {
+    let classes = "live-interface" + liveInterfaceClass(item);
+    if (item.path_only) classes += " path-only";
+    els.push({ group: "nodes", data: { id: item.id, label: item.name, liveKind: "interface", item: item }, classes: classes });
+  }
+  for (const item of snapshot.transports || []) {
+    els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash), liveKind: "transport", item: item }, classes: "live-transport" });
+  }
+  for (const item of snapshot.destinations || []) {
+    const hops = item.hops === null || item.hops === undefined ? "? hops" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
+    els.push({ group: "nodes", data: { id: item.id, label: shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination" });
+  }
+  for (const edge of snapshot.edges || []) {
+    const incomplete = edge.certainty === "incomplete";
+    els.push({
+      group: "edges",
+      data: { id: edge.id, source: edge.source, target: edge.target, label: liveEdgeLabel(edge), liveKind: "edge", item: edge },
+      classes: incomplete ? "live-incomplete" : "live-observed",
+    });
+  }
+  cy.add(els);
+  cy.layout({ name: "breadthfirst", directed: true, roots: cy.getElementById(root.id), spacingFactor: 1.15, padding: 45, animate: false }).run();
+}
+
+function updateLiveHealth(snapshot) {
+  const health = document.getElementById("live-health");
+  const sources = snapshot.health || {};
+  const failed = Object.keys(sources).filter((key) => !sources[key].ok);
+  health.classList.toggle("error", failed.length > 0);
+  if (failed.length) {
+    health.textContent = "Stale/partial · " + failed.map((key) => key + ": " + sources[key].error).join(" · ");
+  } else {
+    health.textContent = (snapshot.interfaces || []).length + " interfaces · " +
+      (snapshot.transports || []).length + " next hops · " +
+      (snapshot.destinations || []).length + " destinations · refreshed " + new Date(snapshot.collected_at * 1000).toLocaleTimeString();
+  }
+}
+
+async function loadLiveState() {
+  if (state.uiMode !== "live") return;
+  try {
+    const snapshot = await api.get("/api/live/state");
+    state.live = snapshot;
+    updateLiveHealth(snapshot);
+    rebuildLive(snapshot);
+  } catch (error) {
+    const health = document.getElementById("live-health");
+    health.textContent = "Live API unavailable";
+    health.classList.add("error");
+  }
+}
+
+function setOperatingMode(mode) {
+  state.uiMode = mode;
+  const live = mode === "live";
+  document.body.classList.toggle("live-mode", live);
+  document.getElementById("mode-simulation").classList.toggle("active", !live);
+  document.getElementById("mode-live").classList.toggle("active", live);
+  state.trafficPick = [];
+  showPanel(null);
+  if (live) loadLiveState();
+  else { rebuild(); updateTrafficBox(); }
+}
+
+function liveValue(value) {
+  return value === null || value === undefined || value === "" ? "unknown" : String(value);
+}
+
+function showLivePanel(el) {
+  const title = document.getElementById("panel-title");
+  const body = document.getElementById("panel-body");
+  if (!el) {
+    title.textContent = "Live RNS details";
+    body.innerHTML = '<div class="muted">Read-only local Reticulum observations. Select an item for details.</div>' +
+      '<div class="live-key"><span class="live-swatch"></span><span class="muted">solid: directly supported relationship</span>' +
+      '<span class="live-swatch incomplete"></span><span class="muted">dashed: incomplete path; intermediate transports are unknown</span></div>';
+    return;
+  }
+  const item = el.data("item") || {};
+  const kind = el.data("liveKind");
+  const row = (name, value) => '<div class="row"><label>' + escapeHtml(name) + '</label><span class="mono">' + escapeHtml(liveValue(value)) + "</span></div>";
+  if (kind === "root") {
+    title.textContent = item.label || "Local RNS";
+    body.innerHTML = row("Transport identity", item.transport_id) + row("Mode", "read-only live observation");
+  } else if (kind === "interface") {
+    title.textContent = item.name || "Interface";
+    body.innerHTML = row("Type", item.type) + row("Interface hash", item.interface_hash) + row("Mode", item.mode) +
+      row("Online", item.status) + row("Peers", item.peers) + row("Bitrate", item.bitrate) + row("MTU", item.mtu) +
+      row("Received bytes", item.rxb) + row("Transmitted bytes", item.txb) +
+      (item.path_only ? '<div class="muted">This interface was reported by the path table but absent from the latest interface status.</div>' : "");
+  } else if (kind === "transport") {
+    title.textContent = "Observed next-hop transport";
+    body.innerHTML = row("Transport hash", item.hash) + row("Interface IDs", (item.interface_ids || []).join(", ")) +
+      '<div class="muted">The local path table supports this as a next hop. It does not reveal routers beyond it.</div>';
+  } else if (kind === "destination") {
+    title.textContent = "Known destination";
+    const remaining = item.hops === null || item.hops === undefined ? "unknown" : Math.max(0, item.hops - (item.via ? 1 : 0));
+    body.innerHTML = row("Destination hash", item.hash) + row("Total hops", item.hops) + row("Next transport", item.via) +
+      row("Unknown remaining hops", remaining) + row("Interface", item.interface) + row("Expires", item.expires);
+  }
 }
 
 function updateNodeLabels() {
@@ -222,6 +381,7 @@ function setSimState(active) {
 }
 
 function showPanel(el) {
+  if (state.uiMode === "live") { showLivePanel(el); return; }
   const title = document.getElementById("panel-title");
   const body = document.getElementById("panel-body");
   if (!el) { title.textContent = "Details"; body.innerHTML = "Select a node or link."; return; }
@@ -607,7 +767,7 @@ function ingestState(snap) {
   rebuildAddrMap();
   rebuildLxmfMap();
   setSimState(snap.active);
-  rebuild();
+  if (state.uiMode === "simulation") rebuild();
   if (state.pendingLayout) { state.pendingLayout = false; setTimeout(runLayout, 40); }
 }
 
@@ -666,6 +826,7 @@ cy.on("tap", "node.host", (e) => {
 });
 
 cy.on("tap", "node.medium", (e) => { showPanel(e.target); });
+cy.on("tap", "node.live-root, node.live-interface, node.live-transport, node.live-destination", (e) => { showPanel(e.target); });
 cy.on("tap", (e) => { if (e.target === cy) showPanel(null); });
 
 cy.on("dragfree", "node.host", (e) => {
@@ -681,6 +842,8 @@ cy.on("dragfree", "node.medium", (e) => {
 
 document.getElementById("btn-start").onclick = () => api.post("/api/start");
 document.getElementById("btn-stop").onclick = () => api.post("/api/stop");
+document.getElementById("mode-simulation").onclick = () => setOperatingMode("simulation");
+document.getElementById("mode-live").onclick = () => setOperatingMode("live");
 
 document.getElementById("btn-add-node").onclick = async () => {
   const ext = cy.extent();
@@ -909,6 +1072,11 @@ setupHold(document.getElementById("btn-reset"), 3000, () => api.post("/api/reset
 
 function runLayout() {
   if (!cy.nodes().length) return;
+  if (state.uiMode === "live") {
+    const roots = state.live && state.live.root ? cy.getElementById(state.live.root.id) : undefined;
+    cy.layout({ name: "breadthfirst", directed: true, roots: roots, spacingFactor: 1.15, padding: 45, animate: true, animationDuration: 500 }).run();
+    return;
+  }
   const layout = cy.layout({
     name: "cose", animate: true, animationDuration: 600, randomize: true,
     nodeOverlap: 24, idealEdgeLength: 110, componentSpacing: 130,
@@ -1091,3 +1259,4 @@ document.getElementById("chat-text").addEventListener("keydown", (e) => { if (e.
 loadState();
 connectWs();
 updateTrafficBox();
+setInterval(loadLiveState, 5000);

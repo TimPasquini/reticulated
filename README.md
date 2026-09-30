@@ -35,5 +35,33 @@ python run.py --hub-port 5900             # move the medium hub off 5800
 SIM_PORT=9000 SIM_HUB_PORT=5900 python run.py
 ```
 
-Each node's `instance_name` is derived from the data directory under simdata/
+## Live RNS topology
 
+The UI has two independent modes. **Simulation** retains the original editable
+simulator. **Live RNS** is a read-only view of the local shared Reticulum
+instance. It polls `rnstatus -j` and `rnpath -t -j` every five seconds and
+exposes the normalized result at `GET /api/live/state`.
+
+Run Reticulated as the same user that can access the shared RNS instance, then
+select **Live RNS** in the toolbar. The local hostname is used for the root
+label; it can be given a friendlier name such as Patroon without hard-coding a
+transport identity:
+
+```bash
+LIVE_RNS_LABEL=Patroon python run.py
+```
+
+Optional live-mode settings are:
+
+- `LIVE_RNS_RNSTATUS` and `LIVE_RNS_RNPATH`: executable paths
+- `LIVE_RNS_CONFIG_DIR`: alternate local Reticulum config directory
+- `LIVE_RNS_TIMEOUT`: per-command timeout in seconds (default `3`)
+- `LIVE_RNS_INTERVAL`: backend collection interval in seconds (default `5`)
+
+Live paths show only what the local transport reports. Solid edges represent
+the local instance, its interfaces, and reported next-hop transports. Dashed
+edges lead to known destinations and label any unresolved remaining hops; the
+application never fabricates intermediate routers. If either command fails,
+the API reports the error and retains the last good data from that source.
+
+Each node's `instance_name` is derived from the data directory under simdata/

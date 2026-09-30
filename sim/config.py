@@ -1,6 +1,7 @@
 import os
 import shutil
 import hashlib
+import socket
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("SIM_DATA_DIR", os.path.join(BASE_DIR, "simdata"))
@@ -15,6 +16,15 @@ HUB_PORT = int(os.environ.get("SIM_HUB_PORT", "5800"))
 
 HTTP_HOST = os.environ.get("SIM_HOST", "127.0.0.1")
 HTTP_PORT = int(os.environ.get("SIM_PORT", "8000"))
+
+# Live mode only invokes read-only, machine-readable RNS utilities. These can
+# point at another local RNS config directory without coupling to RNS internals.
+RNSTATUS_PATH = os.environ.get("LIVE_RNS_RNSTATUS", shutil.which("rnstatus") or "rnstatus")
+RNPATH_PATH = os.environ.get("LIVE_RNS_RNPATH", shutil.which("rnpath") or "rnpath")
+LIVE_RNS_CONFIG_DIR = os.environ.get("LIVE_RNS_CONFIG_DIR")
+LIVE_RNS_LABEL = os.environ.get("LIVE_RNS_LABEL", socket.gethostname() or "Local RNS")
+LIVE_RNS_TIMEOUT = float(os.environ.get("LIVE_RNS_TIMEOUT", "3"))
+LIVE_RNS_INTERVAL = float(os.environ.get("LIVE_RNS_INTERVAL", "5"))
 
 BRIDGE_HOST = os.environ.get("SIM_BRIDGE_HOST", "127.0.0.1")
 TCP_BASE = int(os.environ.get("SIM_TCP_BASE", "6000"))
