@@ -1,0 +1,26 @@
+[
+  {
+    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "timestamp": 1790800000.0,
+    "via": "e54d52a6b508a124909facc807b2f6fc",
+    "hops": 1,
+    "expires": 1791404800.0,
+    "interface": "BackboneInterface[NYC Backbone/lga.us.thunderhost.net:4242]"
+  },
+  {
+    "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "timestamp": 1790800001.0,
+    "via": "e54d52a6b508a124909facc807b2f6fc",
+    "hops": 4,
+    "expires": 1791404801.0,
+    "interface": "BackboneInterface[NYC Backbone/lga.us.thunderhost.net:4242]"
+  },
+  {
+    "hash": "cccccccccccccccccccccccccccccccc",
+    "timestamp": 1790800002.0,
+    "via": "cccccccccccccccccccccccccccccccc",
+    "hops": 0,
+    "expires": 1791404802.0,
+    "interface": "LocalInterface[rns/garage-reticulum-node]"
+  }
+]

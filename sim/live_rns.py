@@ -121,7 +121,17 @@ class LiveRNSProvider:
     def collect(self) -> dict[str, Any]:
         """Collect both sources; retain each source's last good value on failure."""
         status, status_health = self._read_json(self._command(config.RNSTATUS_PATH, "-j"))
-        paths, path_health = self._read_json(self._command(config.RNPATH_PATH, "-t", "-j"))
+        if status_health["ok"]:
+            paths, path_health = self._read_json(self._command(config.RNPATH_PATH, "-t", "-j"))
+        else:
+            # Unlike rnstatus, rnpath can create a standalone RNS instance when
+            # no shared daemon exists. Do not let an observational poller claim
+            # the shared-instance socket during daemon startup or maintenance.
+            paths = None
+            path_health = {
+                "ok": False,
+                "error": "skipped because rnstatus could not reach the shared instance",
+            }
 
         if status_health["ok"]:
             if (
@@ -241,11 +251,15 @@ class LiveRNSProvider:
 
             destination_id = f"destination:{destination_hash}"
             hops = _as_int(raw.get("hops"))
+            reported_via = raw.get("via")
+            # RNS 1.5.5 reports local destinations with zero hops and `via`
+            # equal to the destination itself. That is not a next-hop transport.
+            next_hop = reported_via if hops is None or hops > 0 else None
             destination = {
                 "id": destination_id,
                 "hash": destination_hash,
                 "hops": hops,
-                "via": raw.get("via"),
+                "via": next_hop,
                 "interface_id": interface["id"],
                 "interface": interface_name,
                 "timestamp": raw.get("timestamp"),
@@ -254,7 +268,7 @@ class LiveRNSProvider:
             }
             destinations[destination_id] = destination
 
-            via = raw.get("via")
+            via = next_hop
             if via:
                 transport_key = str(via)
                 transport = transports.get(transport_key)

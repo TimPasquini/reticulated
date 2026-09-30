@@ -1,10 +1,14 @@
 import json
 import subprocess
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from sim import config
 from sim.live_rns import LiveRNSProvider
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 STATUS = {
@@ -59,6 +63,25 @@ PATHS = [
 
 
 class LiveRNSNormalizationTests(unittest.TestCase):
+    def test_normalizes_sanitized_patroon_1_5_5_capture(self):
+        status = json.loads((FIXTURES / "rnstatus_1_5_5_patroon.json").read_text())
+        paths = json.loads((FIXTURES / "rnpath_1_5_5_patroon.json").read_text())
+
+        state = LiveRNSProvider.normalize(status, paths, label="Patroon")
+
+        self.assertEqual(state["root"]["transport_id"], STATUS["transport_id"])
+        self.assertEqual(len(state["interfaces"]), 5)
+        self.assertEqual(len(state["transports"]), 1)
+        self.assertEqual(len(state["destinations"]), 3)
+        modes = {item["type"]: item["mode"] for item in state["interfaces"]}
+        self.assertEqual(modes["BackboneClientInterface"], "boundary")
+        self.assertEqual(modes["I2PInterface"], "gateway")
+        self.assertEqual(modes["RNodeInterface"], "access_point")
+        rnode = next(item for item in state["interfaces"] if item["type"] == "RNodeInterface")
+        self.assertEqual(rnode["raw"]["noise_floor"], -119)
+        local = next(item for item in state["destinations"] if item["hops"] == 0)
+        self.assertIsNone(local["via"])
+
     def test_normalizes_observed_topology_without_inventing_intermediates(self):
         state = LiveRNSProvider.normalize(STATUS, PATHS, label="Patroon")
 
@@ -98,7 +121,6 @@ class LiveRNSCollectionTests(unittest.TestCase):
                 SimpleNamespace(returncode=0, stdout=json.dumps(STATUS), stderr=""),
                 SimpleNamespace(returncode=0, stdout=json.dumps(PATHS), stderr=""),
                 subprocess.TimeoutExpired([config.RNSTATUS_PATH, "-j"], 1),
-                SimpleNamespace(returncode=2, stdout="", stderr="shared instance unavailable"),
             ]
         )
 
@@ -117,7 +139,24 @@ class LiveRNSCollectionTests(unittest.TestCase):
         self.assertEqual(stale["root"]["transport_id"], STATUS["transport_id"])
         self.assertEqual(len(stale["destinations"]), 2)
         self.assertIn("timed out", stale["health"]["rnstatus"]["error"])
-        self.assertIn("exit 2", stale["health"]["rnpath"]["error"])
+        self.assertIn("skipped", stale["health"]["rnpath"]["error"])
+
+    def test_zero_hop_local_path_does_not_create_a_transport(self):
+        local_path = [{
+            "hash": "local-destination",
+            "timestamp": 1234,
+            "via": "local-destination",
+            "hops": 0,
+            "expires": 2345,
+            "interface": "LocalInterface[rns/patroon]",
+        }]
+        state = LiveRNSProvider.normalize({"interfaces": []}, local_path, label="Patroon")
+
+        self.assertEqual(state["transports"], [])
+        self.assertIsNone(state["destinations"][0]["via"])
+        path_edge = next(edge for edge in state["edges"] if edge["kind"] == "known_path")
+        self.assertEqual(path_edge["source"], state["interfaces"][0]["id"])
+        self.assertEqual(path_edge["unknown_hops"], 0)
 
     def test_invalid_json_is_reported_without_raising(self):
         def runner(command, timeout):
@@ -126,7 +165,7 @@ class LiveRNSCollectionTests(unittest.TestCase):
         state = LiveRNSProvider(runner=runner).collect()
         self.assertTrue(state["stale"])
         self.assertIn("invalid JSON", state["health"]["rnstatus"]["error"])
-        self.assertIn("invalid JSON", state["health"]["rnpath"]["error"])
+        self.assertIn("skipped", state["health"]["rnpath"]["error"])
 
 
 if __name__ == "__main__":
