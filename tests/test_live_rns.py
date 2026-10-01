@@ -204,6 +204,23 @@ class LiveRNSCollectionTests(unittest.TestCase):
         self.assertEqual(path_edge["source"], state["interfaces"][0]["id"])
         self.assertEqual(path_edge["unknown_hops"], 0)
 
+    def test_direct_one_hop_destination_does_not_create_a_transport(self):
+        direct_path = [{
+            "hash": "direct-destination",
+            "timestamp": 1,
+            "via": "direct-destination",
+            "hops": 1,
+            "expires": 2,
+            "interface": "AutoInterfacePeer[garage]",
+        }]
+        state = LiveRNSProvider.normalize({"interfaces": []}, direct_path, label="Laptop")
+
+        self.assertEqual(state["transports"], [])
+        self.assertIsNone(state["destinations"][0]["via"])
+        path_edge = next(edge for edge in state["edges"] if edge["kind"] == "known_path")
+        self.assertEqual(path_edge["source"], state["interfaces"][0]["id"])
+        self.assertEqual(path_edge["unknown_hops"], 0)
+
     def test_invalid_json_is_reported_without_raising(self):
         def runner(command, timeout):
             return SimpleNamespace(returncode=0, stdout="not json", stderr="")

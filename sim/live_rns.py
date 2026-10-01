@@ -316,9 +316,11 @@ class LiveRNSProvider:
             destination_id = f"destination:{destination_hash}"
             hops = _as_int(raw.get("hops"))
             reported_via = raw.get("via")
-            # RNS 1.5.5 reports local destinations with zero hops and `via`
-            # equal to the destination itself. That is not a next-hop transport.
-            next_hop = reported_via if hops is None or hops > 0 else None
+            # When an announce has no transport header, RNS stores the
+            # destination hash itself as `via`. It is directly heard, not a
+            # separate next-hop router. This occurs for one-hop paths as well
+            # as destinations local to the shared instance.
+            next_hop = None if reported_via == destination_hash else reported_via
             destination = {
                 "id": destination_id,
                 "hash": destination_hash,
@@ -356,7 +358,7 @@ class LiveRNSProvider:
             else:
                 source_id = interface["id"]
 
-            unknown_hops = max(0, hops - 1) if hops is not None and via else hops
+            unknown_hops = max(0, hops - 1) if hops is not None else None
             edges.append({
                 "id": f"edge:{source_id}:{destination_id}",
                 "source": source_id,

@@ -166,6 +166,7 @@ const cy = cytoscape({
       "label": "data(label)", "color": "#eaffef", "text-valign": "center", "text-halign": "center",
       "font-size": 9, "text-wrap": "wrap", "text-max-width": 100, "text-outline-color": "#11151c", "text-outline-width": 2,
     }},
+    { selector: "node.live-transport.rmap-matched", style: { "border-width": 3, "border-color": "#56b9bd" }},
     { selector: "node.live-rmap-transport", style: {
       "shape": "hexagon", "width": 54, "height": 54, "background-color": "#245f64",
       "label": "data(label)", "color": "#dffcff", "text-valign": "center", "text-halign": "center",
@@ -191,6 +192,10 @@ const cy = cytoscape({
       "label": "data(label)", "color": "#ffe4ae", "text-valign": "center", "text-halign": "center",
       "font-size": 10, "text-wrap": "wrap", "text-max-width": 124, "border-width": 2, "border-color": "#d89b45",
     }},
+    { selector: "node.live-destination-group.hop-1", style: { "background-color": "#275fa8", "border-color": "#4d8cff", "color": "#e8f1ff" }},
+    { selector: "node.live-destination-group.hop-2", style: { "background-color": "#23694f", "border-color": "#2eb67d", "color": "#e6fff5" }},
+    { selector: "node.live-destination-group.hop-3", style: { "background-color": "#80501f", "border-color": "#df8422", "color": "#fff0dc" }},
+    { selector: "node.live-destination-group.hop-deep", style: { "background-color": "#57327d", "border-color": "#9b51e0", "color": "#f2e7ff", "opacity": 0.78 }},
     { selector: "edge", style: { "width": 2, "line-color": "#46566b", "curve-style": "bezier" }},
     { selector: "edge.live-observed", style: { "line-color": "#5b8196", "target-arrow-shape": "triangle", "target-arrow-color": "#5b8196", "arrow-scale": 0.7 }},
     { selector: "edge.live-incomplete", style: {
@@ -199,6 +204,10 @@ const cy = cytoscape({
       "text-background-padding": 2, "curve-style": "bezier",
     }},
     { selector: "edge.live-incomplete:selected", style: { "label": "data(label)" }},
+    { selector: "edge.live-incomplete.hop-1", style: { "line-color": "#4d8cff", "target-arrow-color": "#4d8cff", "line-style": "solid", "width": 3 }},
+    { selector: "edge.live-incomplete.hop-2", style: { "line-color": "#2eb67d", "target-arrow-color": "#2eb67d" }},
+    { selector: "edge.live-incomplete.hop-3", style: { "line-color": "#df8422", "target-arrow-color": "#df8422" }},
+    { selector: "edge.live-incomplete.hop-deep", style: { "line-color": "#9b51e0", "target-arrow-color": "#9b51e0", "opacity": 0.65 }},
     { selector: "edge.live-discovered", style: {
       "line-color": "#56b9bd", "line-style": "dashed", "target-arrow-shape": "triangle", "target-arrow-color": "#56b9bd",
       "label": "", "font-size": 9, "color": "#9fdbde", "text-background-color": "#11151c", "text-background-opacity": 0.85,
@@ -260,9 +269,19 @@ function liveInterfaceClass(item) {
 
 function liveEdgeLabel(edge) {
   if (edge.kind !== "known_path") return "";
+  if (edge.hop_tier === "4+") return "… 3+ unknown hops …";
+  if (edge.hop_tier === "unknown") return "unknown path length";
   if (edge.hops === null || edge.hops === undefined) return "unknown path length";
   if (edge.unknown_hops > 0) return "… " + edge.unknown_hops + " unknown hop" + (edge.unknown_hops === 1 ? "" : "s") + " …";
   return edge.hops === 1 ? "1 hop total" : edge.hops + " hops total";
+}
+
+function liveHopClass(hops, hopTier) {
+  if (hopTier === "4+" || hopTier === "unknown") return " hop-deep";
+  if (hops === 1) return " hop-1";
+  if (hops === 2) return " hop-2";
+  if (hops === 3) return " hop-3";
+  return " hop-deep";
 }
 
 function liveRenderModel(snapshot) {
@@ -275,10 +294,10 @@ function liveRenderModel(snapshot) {
     if (!state.showLiveDestinationSummaries) continue;
     const destination = destinationById[edge.target];
     if (!destination) continue;
-    const hopKey = edge.hops === null || edge.hops === undefined ? "unknown" : String(edge.hops);
-    const key = edge.source + "|" + destination.interface_id + "|" + hopKey;
+    const hopTier = edge.hops === null || edge.hops === undefined ? "unknown" : (edge.hops >= 4 ? "4+" : String(edge.hops));
+    const key = edge.source + "|" + destination.interface_id + "|" + hopTier;
     if (!buckets.has(key)) {
-      buckets.set(key, { source: edge.source, interface_id: destination.interface_id, interface: destination.interface, hops: edge.hops, unknown_hops: edge.unknown_hops, certainty: edge.certainty, entries: [] });
+      buckets.set(key, { source: edge.source, interface_id: destination.interface_id, interface: destination.interface, hop_tier: hopTier, entries: [] });
     }
     buckets.get(key).entries.push({ destination: destination, edge: edge });
   }
@@ -286,23 +305,25 @@ function liveRenderModel(snapshot) {
   const destinationNodes = [];
   const pathEdges = [];
   for (const [key, bucket] of buckets) {
-    if (bucket.entries.length <= 12) {
-      bucket.entries.forEach((entry) => {
-        destinationNodes.push({ kind: "destination", item: entry.destination });
-        pathEdges.push(entry.edge);
-      });
-      continue;
-    }
     const groupId = "destination-group:" + key;
-    const totalHops = bucket.hops === null || bucket.hops === undefined ? "unknown hops" : bucket.hops + " hop" + (bucket.hops === 1 ? "" : "s") + " total";
+    const hopCounts = {};
+    bucket.entries.forEach((entry) => {
+      const exact = entry.edge.hops === null || entry.edge.hops === undefined ? "unknown" : String(entry.edge.hops);
+      hopCounts[exact] = (hopCounts[exact] || 0) + 1;
+    });
+    const exactHops = bucket.hop_tier === "unknown" || bucket.hop_tier === "4+" ? null : Number(bucket.hop_tier);
+    const totalHops = bucket.hop_tier === "unknown" ? "unknown hops" : bucket.hop_tier + " hop" + (bucket.hop_tier === "1" ? "" : "s") + " total";
+    const unknownHops = bucket.hop_tier === "unknown" ? "unknown" : (bucket.hop_tier === "4+" ? "3+" : Math.max(0, exactHops - 1));
     const group = {
       id: groupId,
       count: bucket.entries.length,
       source: bucket.source,
       interface_id: bucket.interface_id,
       interface: bucket.interface,
-      hops: bucket.hops,
-      unknown_hops: bucket.unknown_hops,
+      hops: exactHops,
+      hop_tier: bucket.hop_tier,
+      hop_distribution: hopCounts,
+      unknown_hops: unknownHops,
       sample_hashes: bucket.entries.slice(0, 100).map((entry) => entry.destination.hash),
       label: bucket.entries.length.toLocaleString() + " destinations\n" + totalHops,
     };
@@ -312,43 +333,31 @@ function liveRenderModel(snapshot) {
       source: bucket.source,
       target: groupId,
       kind: "known_path",
-      certainty: bucket.certainty,
-      hops: bucket.hops,
-      unknown_hops: bucket.unknown_hops,
+      certainty: bucket.hop_tier === "1" ? "observed" : "incomplete",
+      hops: exactHops,
+      hop_tier: bucket.hop_tier,
+      unknown_hops: unknownHops,
     });
   }
   const rmapItems = snapshot.rmap_interfaces || [];
-  const rmapGroups = [];
-  if (rmapItems.length > 36) {
-    const grouped = new Map();
-    for (const item of rmapItems) {
-      const hops = item.hops === null || item.hops === undefined ? "unknown" : String(item.hops);
-      const type = item.type || "Unknown interface";
-      const key = hops + "|" + type;
-      if (!grouped.has(key)) grouped.set(key, { hops: item.hops, type: type, items: [], transports: new Set() });
-      const group = grouped.get(key);
-      group.items.push(item);
-      group.transports.add(item.transport_id);
+  const observedTransportIds = new Set((snapshot.transports || []).map((item) => String(item.hash)));
+  const rmapMatches = {};
+  let unmatchedRmapCount = 0;
+  for (const item of rmapItems) {
+    const transportHash = String(item.transport_id || "");
+    if (!observedTransportIds.has(transportHash)) {
+      unmatchedRmapCount += 1;
+      continue;
     }
-    for (const [key, group] of grouped) {
-      const hopLabel = group.hops === null || group.hops === undefined ? "unknown hops" : group.hops + " hop" + (group.hops === 1 ? "" : "s");
-      rmapGroups.push({
-        id: "rmap-group:" + encodeURIComponent(key),
-        hops: group.hops,
-        type: group.type,
-        count: group.items.length,
-        transport_count: group.transports.size,
-        items: group.items,
-        label: hopLabel + "\n" + group.type + "\n" + group.items.length + " interfaces · " + group.transports.size + " transports",
-      });
-    }
-    rmapGroups.sort((a, b) => (a.hops ?? 999) - (b.hops ?? 999) || a.type.localeCompare(b.type));
+    const id = "transport:" + transportHash;
+    if (!rmapMatches[id]) rmapMatches[id] = [];
+    rmapMatches[id].push(item);
   }
   return {
     destinationNodes: destinationNodes,
     edges: observedEdges.concat(pathEdges),
-    rmapGroups: rmapGroups,
-    rmapDetailed: rmapItems.length <= 36,
+    rmapMatches: rmapMatches,
+    unmatchedRmapCount: unmatchedRmapCount,
   };
 }
 
@@ -360,49 +369,6 @@ function livePositions(snapshot, renderModel) {
   interfaces.forEach((item, index) => {
     positions[item.id] = { x: (index - (interfaces.length - 1) / 2) * 220, y: 180 };
   });
-
-  const pathEdges = renderModel.edges.filter((edge) => edge.kind === "known_path");
-  const edgeByDestination = {};
-  pathEdges.forEach((edge) => { edgeByDestination[edge.target] = edge; });
-  const sources = Array.from(new Set(pathEdges.map((edge) => edge.source))).sort();
-
-  // Keep every destination's slot for the lifetime of the page. New paths are
-  // appended to a compact wrapped grid instead of reshuffling existing nodes.
-  // This makes a growing path table much less disorienting.
-  const liveDestinationIds = new Set(renderModel.destinationNodes.map((entry) => entry.item.id));
-  Object.keys(state.liveSlots).forEach((id) => {
-    if (!liveDestinationIds.has(id)) delete state.liveSlots[id];
-  });
-
-  const columns = 18;
-  const columnSpacing = 104;
-  const rowSpacing = 68;
-  const groupSpacing = columns * columnSpacing + 140;
-  const sourceX = {};
-  sources.forEach((source, index) => {
-    sourceX[source] = (index - (sources.length - 1) / 2) * groupSpacing;
-    positions[source] = { x: sourceX[source], y: 360 };
-  });
-
-  for (const entry of renderModel.destinationNodes) {
-    const item = entry.item;
-    const edge = edgeByDestination[item.id];
-    if (!edge) continue;
-    const source = edge.source;
-    let assignment = state.liveSlots[item.id];
-    if (!assignment || assignment.source !== source) {
-      const slot = state.liveNextSlot[source] || 0;
-      assignment = { source: source, slot: slot };
-      state.liveSlots[item.id] = assignment;
-      state.liveNextSlot[source] = slot + 1;
-    }
-    const column = assignment.slot % columns;
-    const row = Math.floor(assignment.slot / columns);
-    positions[item.id] = {
-      x: sourceX[source] + (column - (columns - 1) / 2) * columnSpacing,
-      y: 520 + row * rowSpacing,
-    };
-  }
 
   // Spread next hops around the interfaces that observed them. Several next
   // hops can share an interface, so assigning all of them to its exact x/y
@@ -421,50 +387,36 @@ function livePositions(snapshot, renderModel) {
     group.items.forEach((item, index) => {
       positions[item.id] = {
         x: group.anchorX + (index - (group.items.length - 1) / 2) * 120,
-        y: 360,
+        y: 340,
       };
     });
   }
 
-  // RMAP records are announced interface metadata, not direct adjacency. Keep
-  // them in a separate lower band and group each interface under its transport.
-  if (renderModel.rmapGroups.length) {
-    const columns = Math.min(5, renderModel.rmapGroups.length);
-    renderModel.rmapGroups.forEach((group, index) => {
-      positions[group.id] = {
-        x: (index % columns - (columns - 1) / 2) * 260,
-        y: 540 + Math.floor(index / columns) * 190,
-      };
-    });
-    return positions;
-  }
-
-  const localTransportIds = new Set((snapshot.transports || []).map((item) => item.id));
-  const rmapByTransport = new Map();
-  for (const item of snapshot.rmap_interfaces || []) {
-    const transportId = "transport:" + item.transport_id;
-    if (!rmapByTransport.has(transportId)) rmapByTransport.set(transportId, []);
-    rmapByTransport.get(transportId).push(item);
-  }
-  const newRmapTransports = Array.from(rmapByTransport.keys()).filter((id) => !localTransportIds.has(id)).sort();
-  const rmapColumns = 5;
-  newRmapTransports.forEach((id, index) => {
-    const column = index % rmapColumns;
-    const row = Math.floor(index / rmapColumns);
-    positions[id] = {
-      x: (column - (Math.min(rmapColumns, newRmapTransports.length) - 1) / 2) * 260,
-      y: 540 + row * 260,
-    };
+  // A path entry tells us the first transport and total hop count, but not the
+  // intervening routers. Place aggregates in hop-depth bands without inventing
+  // those routers. Four-or-more-hop paths share a deep-mesh band.
+  const pathEdges = renderModel.edges.filter((edge) => edge.kind === "known_path");
+  const destinationsBySource = new Map();
+  pathEdges.forEach((edge) => {
+    if (!destinationsBySource.has(edge.source)) destinationsBySource.set(edge.source, []);
+    destinationsBySource.get(edge.source).push(edge);
   });
-  for (const [transportId, items] of rmapByTransport) {
-    const parent = positions[transportId] || { x: 0, y: 540 };
-    const childY = localTransportIds.has(transportId) ? 700 : parent.y + 145;
-    items.sort((a, b) => a.id.localeCompare(b.id)).forEach((item, index) => {
-      positions[item.id] = {
-        x: parent.x + (index - (items.length - 1) / 2) * 150,
-        y: childY,
-      };
+  for (const [source, edges] of destinationsBySource) {
+    const anchor = positions[source] || { x: 0, y: 340 };
+    const edgesByTier = new Map();
+    edges.forEach((edge) => {
+      const tier = edge.hop_tier === "unknown" ? 5 : (edge.hop_tier === "4+" ? 4 : Number(edge.hop_tier || edge.hops || 5));
+      if (!edgesByTier.has(tier)) edgesByTier.set(tier, []);
+      edgesByTier.get(tier).push(edge);
     });
+    for (const [tier, tierEdges] of edgesByTier) {
+      tierEdges.forEach((edge, index) => {
+        positions[edge.target] = {
+          x: anchor.x + (index - (tierEdges.length - 1) / 2) * 155,
+          y: 450 + (tier - 1) * 125,
+        };
+      });
+    }
   }
   return positions;
 }
@@ -494,40 +446,15 @@ function rebuildLive(snapshot) {
     const transportCounts = (snapshot.path_summary || {}).by_transport || {};
     const destinationCount = transportCounts[item.hash] || 0;
     const countLabel = destinationCount ? "\n" + destinationCount.toLocaleString() + " destinations" : "";
-    els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash) + countLabel, liveKind: "transport", item: item }, classes: "live-transport", position: positions[item.id] });
-  }
-  if (renderModel.rmapGroups.length) {
-    for (const group of renderModel.rmapGroups) {
-      els.push({ group: "nodes", data: { id: group.id, label: group.label, liveKind: "rmap_group", item: group }, classes: "live-rmap-group", position: positions[group.id] });
-      els.push({ group: "edges", data: { id: "edge:rmap:" + root.id + ":" + group.id, source: root.id, target: group.id, label: "RMAP aggregate", liveKind: "edge", item: { kind: "rmap_aggregate", certainty: "advertised", hops: group.hops } }, classes: "live-discovered" });
-    }
-  } else {
-    const existingTransportIds = new Set((snapshot.transports || []).map((item) => item.id));
-    const rmapByTransport = new Map();
-    for (const item of snapshot.rmap_interfaces || []) {
-      const transportId = "transport:" + item.transport_id;
-      if (!rmapByTransport.has(transportId)) rmapByTransport.set(transportId, []);
-      rmapByTransport.get(transportId).push(item);
-    }
-    for (const [transportId, items] of rmapByTransport) {
-      if (!existingTransportIds.has(transportId)) {
-        const hops = items.map((item) => item.hops).filter((value) => value !== null && value !== undefined);
-        const nearestHops = hops.length ? Math.min(...hops) : null;
-        const transportItem = { id: transportId, hash: items[0].transport_id, rmap: true, hops: nearestHops };
-        const hopLabel = nearestHops === null ? "" : "\n" + nearestHops + " hop" + (nearestHops === 1 ? "" : "s");
-        els.push({ group: "nodes", data: { id: transportId, label: "RMAP transport\n" + shortHash(items[0].transport_id) + hopLabel, liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport", position: positions[transportId] });
-        els.push({ group: "edges", data: { id: "edge:rmap:" + root.id + ":" + transportId, source: root.id, target: transportId, label: nearestHops === null ? "RMAP announce" : "RMAP announce · " + nearestHops + " hops", liveKind: "edge", item: { kind: "rmap_discovery", certainty: "advertised" } }, classes: "live-discovered" });
-      }
-      for (const item of items) {
-        els.push({ group: "nodes", data: { id: item.id, label: item.name + "\n" + (item.type || "interface"), liveKind: "rmap_interface", item: item }, classes: "live-rmap-interface", position: positions[item.id] });
-        els.push({ group: "edges", data: { id: "edge:" + transportId + ":" + item.id, source: transportId, target: item.id, label: "advertised interface", liveKind: "edge", item: { kind: "rmap_advertisement", certainty: "advertised" } }, classes: "live-discovered" });
-      }
-    }
+    const rmapRecords = renderModel.rmapMatches[item.id] || [];
+    const rmapLabel = rmapRecords.length ? "\nRMAP: " + (rmapRecords[0].name || rmapRecords[0].type || "matched") : "";
+    const transportItem = { ...item, rmap_records: rmapRecords };
+    els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash) + rmapLabel + countLabel, liveKind: "transport", item: transportItem }, classes: "live-transport" + (rmapRecords.length ? " rmap-matched" : ""), position: positions[item.id] });
   }
   for (const entry of renderModel.destinationNodes) {
     const item = entry.item;
     if (entry.kind === "destination_group") {
-      els.push({ group: "nodes", data: { id: item.id, label: item.label, liveKind: "destination_group", item: item }, classes: "live-destination-group", position: positions[item.id] });
+      els.push({ group: "nodes", data: { id: item.id, label: item.label, liveKind: "destination_group", item: item }, classes: "live-destination-group" + liveHopClass(item.hops, item.hop_tier), position: positions[item.id] });
     } else {
       const hops = item.hops === null || item.hops === undefined ? "? hops" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
       els.push({ group: "nodes", data: { id: item.id, label: shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination", position: positions[item.id] });
@@ -538,7 +465,7 @@ function rebuildLive(snapshot) {
     els.push({
       group: "edges",
       data: { id: edge.id, source: edge.source, target: edge.target, label: liveEdgeLabel(edge), liveKind: "edge", item: edge },
-      classes: incomplete ? "live-incomplete" : "live-observed",
+      classes: (incomplete ? "live-incomplete" : "live-observed") + (edge.kind === "known_path" ? liveHopClass(edge.hops, edge.hop_tier) : ""),
     });
   }
   cy.add(els);
@@ -553,7 +480,10 @@ function rebuildLive(snapshot) {
     if (element.nonempty()) { element.select(); restoredSelection = element; }
   });
   if (restoredSelection) showPanel(restoredSelection);
-  if (shouldAutoLayout) requestAnimationFrame(() => runLiveLayout(true));
+  if (shouldAutoLayout) {
+    state.liveLayoutPending = false;
+    requestAnimationFrame(() => cy.fit(cy.elements(), 60));
+  }
 }
 
 function updateLiveHealth(snapshot) {
@@ -613,7 +543,7 @@ function showLivePanel(el) {
     title.textContent = "Live RNS details";
     body.innerHTML = '<div class="muted">Read-only local Reticulum observations. Select an item for details.</div>' +
       '<div class="live-key"><span class="live-swatch"></span><span class="muted">solid: directly supported relationship</span>' +
-      '<span class="live-swatch incomplete"></span><span class="muted">dashed: incomplete path or RMAP-advertised relationship</span></div>';
+      '<span class="live-swatch incomplete"></span><span class="muted">dashed: unknown intermediate hops</span></div>';
     return;
   }
   const item = el.data("item") || {};
@@ -637,10 +567,14 @@ function showLivePanel(el) {
       hopCounts[key] = (hopCounts[key] || 0) + 1;
     });
     const distribution = Object.keys(hopCounts).sort((a, b) => Number(a) - Number(b)).map((hops) => hops + " hops: " + hopCounts[hops]).join(" · ");
+    const rmapRecords = item.rmap_records || [];
+    const rmapDetails = rmapRecords.length ? '<details class="section"><summary>Matched RMAP metadata (' + rmapRecords.length + ')</summary>' +
+      rmapRecords.map((record) => row("Advertised interface", record.name) + row("Type", record.type) +
+        row("Latitude", record.latitude) + row("Longitude", record.longitude)).join("") + "</details>" : "";
     title.textContent = "Observed next-hop transport";
     body.innerHTML = row("Transport hash", item.hash) + row("Interface IDs", (item.interface_ids || []).join(", ")) +
       row("Known destinations", knownDestinationCount) + row("Hop distribution", distribution || "load path summaries to inspect") +
-      '<div class="muted">The local path table supports this as a next hop. It does not reveal routers beyond it.</div>';
+      '<div class="muted">The local path table supports this as a next hop. It does not reveal routers beyond it.</div>' + rmapDetails;
   } else if (kind === "rmap_transport") {
     title.textContent = "RMAP-discovered transport";
     body.innerHTML = row("Transport hash", item.hash) + row("Announced hops", item.hops) +
@@ -664,7 +598,8 @@ function showLivePanel(el) {
   } else if (kind === "destination_group") {
     title.textContent = "Destination summary";
     const hashes = item.sample_hashes.map((hash) => '<div class="mono">' + escapeHtml(hash) + "</div>").join("");
-    body.innerHTML = row("Destinations", item.count) + row("Total hops", item.hops) +
+    const distribution = Object.keys(item.hop_distribution || {}).sort((a, b) => Number(a) - Number(b)).map((hops) => hops + " hops: " + item.hop_distribution[hops]).join(" · ");
+    body.innerHTML = row("Destinations", item.count) + row("Hop tier", item.hop_tier) + row("Exact distribution", distribution || item.hop_tier) +
       row("Unknown after next hop", item.unknown_hops) + row("Interface", item.interface) +
       '<details class="section"><summary>Destination hashes' + (item.count > item.sample_hashes.length ? " (first " + item.sample_hashes.length + ")" : "") + '</summary><div class="destination-hashes">' + hashes + "</div></details>";
   } else if (kind === "destination") {
@@ -1183,7 +1118,7 @@ document.getElementById("mode-live").onclick = () => setOperatingMode("live");
 document.getElementById("btn-live-rmap").onclick = () => {
   state.showLiveRmap = !state.showLiveRmap;
   state.liveLayoutPending = true;
-  document.getElementById("btn-live-rmap").textContent = state.showLiveRmap ? "Hide RMAP discovery" : "Show RMAP discovery";
+  document.getElementById("btn-live-rmap").textContent = state.showLiveRmap ? "Hide RMAP metadata" : "Show RMAP metadata";
   loadLiveState();
 };
 document.getElementById("btn-live-destinations").onclick = () => {
@@ -1656,7 +1591,7 @@ document.getElementById("chat-text").addEventListener("keydown", (e) => { if (e.
 const initialQuery = new URLSearchParams(location.search);
 if (initialQuery.get("rmap") === "true") {
   state.showLiveRmap = true;
-  document.getElementById("btn-live-rmap").textContent = "Hide RMAP discovery";
+  document.getElementById("btn-live-rmap").textContent = "Hide RMAP metadata";
 }
 if (initialQuery.get("paths") === "true") {
   state.showLiveDestinationSummaries = true;
