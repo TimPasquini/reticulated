@@ -1,0 +1,17 @@
+[Unit]
+Description=Reticulated topology aggregator
+After=network-online.target rnsd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tim
+WorkingDirectory=/home/tim/reticulated
+EnvironmentFile=/etc/reticulated/reticulated.env
+ExecStart=/home/tim/reticulated/.venv/bin/python run.py --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

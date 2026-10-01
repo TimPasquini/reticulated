@@ -57,6 +57,7 @@ Optional live-mode settings are:
 - `LIVE_RNS_CONFIG_DIR`: alternate local Reticulum config directory
 - `LIVE_RNS_TIMEOUT`: per-command timeout in seconds (default `3`)
 - `LIVE_RNS_INTERVAL`: backend collection interval in seconds (default `5`)
+- `LIVE_RNS_REPORTER_ID`: stable ID for this server's local report
 
 Live paths show only what the local transport reports. Solid edges represent
 the local instance, its interfaces, and reported next-hop transports. Dashed
@@ -69,5 +70,47 @@ RNS telemetry can be adopted without another collector redesign.
 RNS 1.5.5 adds live interface attach, detach, and reload operations to
 `rnstatus`. Reticulated deliberately does not invoke or expose those operations;
 they are reserved for a separately designed, authenticated management mode.
+
+### Multiple reporters
+
+A Reticulated instance can aggregate read-only observations from other nodes we
+control. The server always registers its own local RNS observation. Set a token
+to enable remote report ingestion:
+
+```bash
+RETICULATED_REPORT_TOKEN='replace-with-a-long-random-token' \
+LIVE_RNS_REPORTER_ID=patroon \
+LIVE_RNS_LABEL=Patroon \
+python run.py --host 0.0.0.0 --port 8765
+```
+
+Keep this listener on the trusted LAN; this does not require a WAN port, public
+DNS, or changes to Patroon's I2P gateway. On Fedora, send an observation every
+30 seconds with:
+
+```bash
+RETICULATED_REPORT_TOKEN='the-same-token' \
+python -m sim.reporter \
+  --server http://garage-reticulum-node:8765 \
+  --id fedora-laptop \
+  --label 'Fedora laptop'
+```
+
+The reporter gzip-compresses normalized `rnstatus -j`, `rnpath -t -j`, and
+`rnstatus -d -j` observations. It never invokes interface management or other
+mutating RNS commands. Reports are kept in memory and replaced atomically;
+after a server restart, each node repopulates its entry on its next interval.
+
+The Live RNS toolbar can switch between reporters. The reporter catalog also
+returns correlations when one reporter's transport identity is another
+reporter's observed next hop. Useful endpoints are:
+
+- `GET /api/live/reporters`
+- `GET /api/live/reporters/{id}/state`
+- `POST /api/live/reporters/{id}` (Bearer token required)
+
+Example systemd units and environment files are in `deploy/`. Generate a
+unique token, protect the environment file, and adjust repository paths before
+installing them.
 
 Each node's `instance_name` is derived from the data directory under simdata/

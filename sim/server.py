@@ -1,18 +1,25 @@
 import asyncio
+import gzip
+import hmac
+import io
+import json
 import os
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import config
 from .live_rns import LiveRNSProvider
+from .live_reports import LiveReportRegistry, validate_reporter_id
 from .manager import Simulator
 
 sim = Simulator()
 live_rns = LiveRNSProvider()
+live_reports = LiveReportRegistry(stale_after=config.LIVE_REPORT_STALE_AFTER)
 clients = set()
 clients_lock = asyncio.Lock()
 
@@ -133,7 +140,8 @@ async def status_pump():
 
 async def live_rns_pump():
     while True:
-        await asyncio.to_thread(live_rns.collect)
+        snapshot = await asyncio.to_thread(live_rns.collect)
+        live_reports.update(config.LIVE_RNS_REPORTER_ID, snapshot, local=True)
         await asyncio.sleep(config.LIVE_RNS_INTERVAL)
 
 
@@ -168,6 +176,77 @@ def get_live_state(include_paths: bool = False, include_rmap: bool = False):
     return live_rns.topology_snapshot(
         include_paths=include_paths, include_rmap=include_rmap
     )
+
+
+@app.get("/api/live/reporters")
+def get_live_reporters():
+    return {
+        "reporters": live_reports.list(),
+        "correlations": live_reports.correlations(),
+        "remote_ingest_enabled": bool(config.LIVE_REPORT_TOKEN),
+    }
+
+
+@app.get("/api/live/reporters/{reporter_id}/state")
+def get_live_reporter_state(
+    reporter_id: str, include_paths: bool = False, include_rmap: bool = False
+):
+    try:
+        state = live_reports.get(
+            reporter_id, include_paths=include_paths, include_rmap=include_rmap
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if state is None:
+        raise HTTPException(status_code=404, detail="unknown reporter")
+    return state
+
+
+def _decode_report_body(raw: bytes, content_encoding: str | None) -> dict:
+    if len(raw) > config.LIVE_REPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="compressed report is too large")
+    if content_encoding:
+        if content_encoding.lower() != "gzip":
+            raise HTTPException(status_code=415, detail="only gzip content encoding is supported")
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as source:
+                raw = source.read(config.LIVE_REPORT_MAX_BYTES + 1)
+        except (OSError, EOFError) as exc:
+            raise HTTPException(status_code=400, detail="invalid gzip report") from exc
+    if len(raw) > config.LIVE_REPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="uncompressed report is too large")
+    try:
+        report = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON report") from exc
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=400, detail="report must be a JSON object")
+    return report
+
+
+@app.post("/api/live/reporters/{reporter_id}")
+async def post_live_report(reporter_id: str, request: Request):
+    """Accept a normalized, read-only report from a controlled RNS node."""
+    if not config.LIVE_REPORT_TOKEN:
+        raise HTTPException(status_code=503, detail="remote reporter ingestion is disabled")
+    supplied = request.headers.get("authorization", "")
+    expected = f"Bearer {config.LIVE_REPORT_TOKEN}"
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="invalid reporter token")
+    try:
+        validate_reporter_id(reporter_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if reporter_id == config.LIVE_RNS_REPORTER_ID:
+        raise HTTPException(status_code=409, detail="reporter ID is reserved for this server")
+    report = _decode_report_body(
+        await request.body(), request.headers.get("content-encoding")
+    )
+    try:
+        live_reports.update(reporter_id, report)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "reporter_id": reporter_id, "received_at": time.time()}
 
 
 @app.get("/api/paths/{node_id}")

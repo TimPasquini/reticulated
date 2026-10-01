@@ -26,6 +26,7 @@ Repository = "https://github.com/RFnexus/reticulated"
 
 [project.scripts]
 reticulated = "run:main"
+reticulated-reporter = "sim.reporter:main"
 
 [tool.setuptools]
 include-package-data = true

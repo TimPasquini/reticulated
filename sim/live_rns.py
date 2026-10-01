@@ -16,6 +16,39 @@ from . import config
 CommandRunner = Callable[[list[str], float], Any]
 
 
+def topology_snapshot(
+    source: dict[str, Any], *, include_paths: bool = False, include_rmap: bool = False
+) -> dict[str, Any]:
+    """Project a full normalized report into the requested API representation."""
+    state = json.loads(json.dumps(source))
+    destinations = state.get("destinations", [])
+    counts_by_transport: dict[str, int] = {}
+    for destination in destinations:
+        via = destination.get("via")
+        if via:
+            key = str(via)
+            counts_by_transport[key] = counts_by_transport.get(key, 0) + 1
+    state["path_summary"] = {
+        "destination_count": len(destinations),
+        "by_transport": counts_by_transport,
+    }
+    rmap_interfaces = state.get("rmap_interfaces", [])
+    state["rmap_summary"] = {
+        "interface_count": len(rmap_interfaces),
+        "transport_count": len(
+            {item.get("transport_id") for item in rmap_interfaces if item.get("transport_id")}
+        ),
+    }
+    if not include_paths:
+        state["destinations"] = []
+        state["edges"] = [
+            edge for edge in state.get("edges", []) if edge.get("kind") != "known_path"
+        ]
+    if not include_rmap:
+        state["rmap_interfaces"] = []
+    return state
+
+
 def _stable_fragment(value: Any) -> str:
     """Return a stable, JSON-safe identifier fragment for non-hash values."""
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:24]
@@ -59,10 +92,16 @@ class LiveRNSProvider:
         label: str | None = None,
         timeout: float | None = None,
         runner: CommandRunner | None = None,
+        rnstatus_path: str | None = None,
+        rnpath_path: str | None = None,
+        config_dir: str | None = None,
     ) -> None:
         self.label = label or config.LIVE_RNS_LABEL
         self.timeout = timeout if timeout is not None else config.LIVE_RNS_TIMEOUT
         self.runner = runner or _default_runner
+        self.rnstatus_path = rnstatus_path or config.RNSTATUS_PATH
+        self.rnpath_path = rnpath_path or config.RNPATH_PATH
+        self.config_dir = config_dir if config_dir is not None else config.LIVE_RNS_CONFIG_DIR
         self._lock = threading.Lock()
         self._last_status: dict[str, Any] | None = None
         self._last_paths: list[dict[str, Any]] | None = None
@@ -87,11 +126,10 @@ class LiveRNSProvider:
             },
         }
 
-    @staticmethod
-    def _command(tool: str, *arguments: str) -> list[str]:
+    def _command(self, tool: str, *arguments: str) -> list[str]:
         command = [tool, *arguments]
-        if config.LIVE_RNS_CONFIG_DIR:
-            command.extend(["--config", config.LIVE_RNS_CONFIG_DIR])
+        if self.config_dir:
+            command.extend(["--config", self.config_dir])
         return command
 
     def _read_json(self, command: list[str]) -> tuple[Any | None, dict[str, Any]]:
@@ -123,11 +161,11 @@ class LiveRNSProvider:
 
     def collect(self) -> dict[str, Any]:
         """Collect both sources; retain each source's last good value on failure."""
-        status, status_health = self._read_json(self._command(config.RNSTATUS_PATH, "-j"))
+        status, status_health = self._read_json(self._command(self.rnstatus_path, "-j"))
         if status_health["ok"]:
-            paths, path_health = self._read_json(self._command(config.RNPATH_PATH, "-t", "-j"))
+            paths, path_health = self._read_json(self._command(self.rnpath_path, "-t", "-j"))
             discovered, rmap_health = self._read_json(
-                self._command(config.RNSTATUS_PATH, "-d", "-j")
+                self._command(self.rnstatus_path, "-d", "-j")
             )
         else:
             # Unlike rnstatus, rnpath can create a standalone RNS instance when
@@ -195,33 +233,9 @@ class LiveRNSProvider:
         not part of the default topology payload. This also prevents older open
         browser tabs from rebuilding thousands of destination nodes.
         """
-        state = self.snapshot()
-        destinations = state.get("destinations", [])
-        counts_by_transport: dict[str, int] = {}
-        for destination in destinations:
-            via = destination.get("via")
-            if via:
-                key = str(via)
-                counts_by_transport[key] = counts_by_transport.get(key, 0) + 1
-        state["path_summary"] = {
-            "destination_count": len(destinations),
-            "by_transport": counts_by_transport,
-        }
-        rmap_interfaces = state.get("rmap_interfaces", [])
-        state["rmap_summary"] = {
-            "interface_count": len(rmap_interfaces),
-            "transport_count": len(
-                {item.get("transport_id") for item in rmap_interfaces if item.get("transport_id")}
-            ),
-        }
-        if not include_paths:
-            state["destinations"] = []
-            state["edges"] = [
-                edge for edge in state.get("edges", []) if edge.get("kind") != "known_path"
-            ]
-        if not include_rmap:
-            state["rmap_interfaces"] = []
-        return state
+        return topology_snapshot(
+            self.snapshot(), include_paths=include_paths, include_rmap=include_rmap
+        )
 
     @staticmethod
     def normalize(

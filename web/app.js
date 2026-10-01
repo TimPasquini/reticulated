@@ -37,6 +37,8 @@ function loraBitrate(sf, bw, cr) {
 const state = {
   uiMode: "simulation",
   live: null,
+  liveReporterId: null,
+  liveReporters: [],
   showLiveDestinationSummaries: false,
   showLiveRmap: false,
   liveLayoutPending: true,
@@ -490,15 +492,18 @@ function updateLiveHealth(snapshot) {
   const health = document.getElementById("live-health");
   const sources = snapshot.health || {};
   const failed = Object.keys(sources).filter((key) => !sources[key].ok);
-  health.classList.toggle("error", failed.length > 0);
+  const reporter = snapshot.reporter || {};
+  health.classList.toggle("error", failed.length > 0 || reporter.stale === true);
   if (failed.length) {
     health.textContent = "Stale/partial · " + failed.map((key) => key + ": " + sources[key].error).join(" · ");
+  } else if (reporter.stale) {
+    health.textContent = "Reporter stale · last received " + Math.round(reporter.age_seconds || 0) + "s ago";
   } else {
     const destinationCount = (snapshot.path_summary || {}).destination_count ?? (snapshot.destinations || []).length;
     const rmapCount = (snapshot.rmap_summary || {}).interface_count || 0;
     health.textContent = (snapshot.interfaces || []).length + " interfaces · " +
       (snapshot.transports || []).length + " next hops · " +
-      destinationCount + " known paths · " + rmapCount + " RMAP interfaces · refreshed " + new Date(snapshot.collected_at * 1000).toLocaleTimeString();
+      destinationCount + " known paths · " + rmapCount + " RMAP interfaces · received " + Math.round(reporter.age_seconds || 0) + "s ago";
   }
 }
 
@@ -506,10 +511,13 @@ async function loadLiveState() {
   if (state.uiMode !== "live") return;
   if (state.liveLayoutRunning) return;
   try {
+    await refreshLiveReporters();
+    if (!state.liveReporterId) return;
     const query = new URLSearchParams();
     if (state.showLiveDestinationSummaries) query.set("include_paths", "true");
     if (state.showLiveRmap) query.set("include_rmap", "true");
-    const snapshot = await api.get("/api/live/state" + (query.size ? "?" + query.toString() : ""));
+    const endpoint = "/api/live/reporters/" + encodeURIComponent(state.liveReporterId) + "/state";
+    const snapshot = await api.get(endpoint + (query.size ? "?" + query.toString() : ""));
     state.live = snapshot;
     updateLiveHealth(snapshot);
     rebuildLive(snapshot);
@@ -518,6 +526,25 @@ async function loadLiveState() {
     health.textContent = "Live API unavailable";
     health.classList.add("error");
   }
+}
+
+async function refreshLiveReporters() {
+  const catalog = await api.get("/api/live/reporters");
+  const reporters = catalog.reporters || [];
+  state.liveReporters = reporters;
+  if (!reporters.some((item) => item.id === state.liveReporterId)) {
+    const preferred = reporters.find((item) => item.local) || reporters[0];
+    state.liveReporterId = preferred ? preferred.id : null;
+  }
+  const select = document.getElementById("live-reporter");
+  const signature = reporters.map((item) => item.id + ":" + item.stale).join("|");
+  if (select.dataset.signature !== signature) {
+    select.innerHTML = reporters.map((item) =>
+      '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.label) + (item.stale ? " (stale)" : "") + "</option>"
+    ).join("");
+    select.dataset.signature = signature;
+  }
+  if (state.liveReporterId) select.value = state.liveReporterId;
 }
 
 function setOperatingMode(mode) {
@@ -551,7 +578,10 @@ function showLivePanel(el) {
   const row = (name, value) => '<div class="row"><label>' + escapeHtml(name) + '</label><span class="mono">' + escapeHtml(liveValue(value)) + "</span></div>";
   if (kind === "root") {
     title.textContent = item.label || "Local RNS";
-    body.innerHTML = row("Transport identity", item.transport_id) + row("Mode", "read-only live observation");
+    const reporter = (state.live || {}).reporter || {};
+    body.innerHTML = row("Reporter ID", reporter.id) + row("Transport identity", item.transport_id) +
+      row("Report age", reporter.age_seconds === undefined ? "unknown" : reporter.age_seconds + " seconds") +
+      row("Mode", "read-only live observation");
   } else if (kind === "interface") {
     title.textContent = item.name || "Interface";
     body.innerHTML = row("Type", item.type) + row("Interface hash", item.interface_hash) + row("Mode", item.mode) +
@@ -1115,6 +1145,13 @@ document.getElementById("btn-start").onclick = () => api.post("/api/start");
 document.getElementById("btn-stop").onclick = () => api.post("/api/stop");
 document.getElementById("mode-simulation").onclick = () => setOperatingMode("simulation");
 document.getElementById("mode-live").onclick = () => setOperatingMode("live");
+document.getElementById("live-reporter").onchange = (event) => {
+  state.liveReporterId = event.target.value;
+  state.live = null;
+  state.liveLayoutPending = true;
+  cy.elements().remove();
+  loadLiveState();
+};
 document.getElementById("btn-live-rmap").onclick = () => {
   state.showLiveRmap = !state.showLiveRmap;
   state.liveLayoutPending = true;
@@ -1589,6 +1626,7 @@ document.getElementById("chat-send").onclick = sendChat;
 document.getElementById("chat-text").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
 
 const initialQuery = new URLSearchParams(location.search);
+if (initialQuery.get("reporter")) state.liveReporterId = initialQuery.get("reporter");
 if (initialQuery.get("rmap") === "true") {
   state.showLiveRmap = true;
   document.getElementById("btn-live-rmap").textContent = "Hide RMAP metadata";
