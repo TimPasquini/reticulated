@@ -65,6 +65,7 @@ details.section > summary::before { content: "\25B8  "; color: #6b7a8d; }
 details.section[open] > summary::before { content: "\25BE  "; }
 #heard { max-height: 130px; overflow-y: auto; }
 .heard-row { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0; border-bottom: 1px solid #1b212b; }
+.destination-hashes { max-height: 320px; overflow-y: auto; display: grid; gap: 3px; }
 
 #log-box { padding: 12px; }
 .log-header { display: flex; align-items: center; justify-content: space-between; }
