@@ -37,7 +37,7 @@ function loraBitrate(sf, bw, cr) {
 const state = {
   uiMode: "simulation",
   live: null,
-  liveReporterId: null,
+  liveReporterId: "all",
   liveReporters: [],
   showLiveDestinationSummaries: false,
   showLiveRmap: false,
@@ -154,6 +154,9 @@ const cy = cytoscape({
       "label": "data(label)", "color": "#fff", "text-valign": "center", "text-halign": "center",
       "font-size": 11, "text-wrap": "wrap", "text-max-width": 130, "text-outline-color": "#11151c", "text-outline-width": 2,
     }},
+    { selector: "node.live-root.secondary", style: { "background-color": "#42608a", "width": 54, "height": 54 }},
+    { selector: "node.live-root.stale", style: { "opacity": 0.55, "border-width": 3, "border-style": "dashed", "border-color": "#d89b45" }},
+    { selector: "node.live-root.rmap-matched", style: { "border-width": 3, "border-color": "#56b9bd" }},
     { selector: "node.live-interface", style: {
       "shape": "round-rectangle", "width": 126, "height": 42, "background-color": "#356b82",
       "label": "data(label)", "color": "#eef8ff", "text-valign": "center", "text-halign": "center",
@@ -299,7 +302,15 @@ function liveRenderModel(snapshot) {
     const hopTier = edge.hops === null || edge.hops === undefined ? "unknown" : (edge.hops >= 4 ? "4+" : String(edge.hops));
     const key = edge.source + "|" + destination.interface_id + "|" + hopTier;
     if (!buckets.has(key)) {
-      buckets.set(key, { source: edge.source, interface_id: destination.interface_id, interface: destination.interface, hop_tier: hopTier, entries: [] });
+      buckets.set(key, {
+        source: edge.source,
+        interface_id: destination.interface_id,
+        interface: destination.interface,
+        reporter_id: destination.reporter_id,
+        reporter_label: destination.reporter_label,
+        hop_tier: hopTier,
+        entries: [],
+      });
     }
     buckets.get(key).entries.push({ destination: destination, edge: edge });
   }
@@ -327,7 +338,10 @@ function liveRenderModel(snapshot) {
       hop_distribution: hopCounts,
       unknown_hops: unknownHops,
       sample_hashes: bucket.entries.slice(0, 100).map((entry) => entry.destination.hash),
-      label: bucket.entries.length.toLocaleString() + " destinations\n" + totalHops,
+      reporter_id: bucket.reporter_id,
+      reporter_label: bucket.reporter_label,
+      label: bucket.entries.length.toLocaleString() + " destinations\n" + totalHops +
+        (bucket.reporter_label ? " from " + bucket.reporter_label : ""),
     };
     destinationNodes.push({ kind: "destination_group", item: group });
     pathEdges.push({
@@ -343,6 +357,9 @@ function liveRenderModel(snapshot) {
   }
   const rmapItems = snapshot.rmap_interfaces || [];
   const observedTransportIds = new Set((snapshot.transports || []).map((item) => String(item.hash)));
+  (snapshot.reporter_roots || [snapshot.root]).forEach((root) => {
+    if (root.transport_id) observedTransportIds.add(String(root.transport_id));
+  });
   const rmapMatches = {};
   let unmatchedRmapCount = 0;
   for (const item of rmapItems) {
@@ -365,11 +382,35 @@ function liveRenderModel(snapshot) {
 
 function livePositions(snapshot, renderModel) {
   const positions = {};
-  positions[snapshot.root.id] = { x: 0, y: 0 };
+  const roots = snapshot.reporter_roots || [snapshot.root];
+  const primary = roots.find((root) => root.primary) || snapshot.root;
+  positions[primary.id] = { x: 0, y: 0 };
+  let secondaryIndex = 0;
+  roots.forEach((root) => {
+    if (root.id === primary.id) return;
+    secondaryIndex += 1;
+    const direction = secondaryIndex % 2 ? -1 : 1;
+    positions[root.id] = { x: direction * Math.ceil(secondaryIndex / 2) * 520, y: -300 };
+  });
 
-  const interfaces = snapshot.interfaces || [];
-  interfaces.forEach((item, index) => {
-    positions[item.id] = { x: (index - (interfaces.length - 1) / 2) * 220, y: 180 };
+  const interfacesByRoot = new Map();
+  renderModel.edges.filter((edge) => edge.kind === "observed_interface").forEach((edge) => {
+    if (!interfacesByRoot.has(edge.source)) interfacesByRoot.set(edge.source, []);
+    interfacesByRoot.get(edge.source).push(edge.target);
+  });
+  for (const root of roots) {
+    const children = (interfacesByRoot.get(root.id) || []).sort();
+    const anchor = positions[root.id];
+    children.forEach((id, index) => {
+      positions[id] = {
+        x: anchor.x + (index - (children.length - 1) / 2) * 190,
+        y: anchor.y + 170,
+      };
+    });
+  }
+  const unpositionedInterfaces = (snapshot.interfaces || []).filter((item) => !positions[item.id]);
+  unpositionedInterfaces.forEach((item, index) => {
+    positions[item.id] = { x: (index - (unpositionedInterfaces.length - 1) / 2) * 190, y: 170 };
   });
 
   // Spread next hops around the interfaces that observed them. Several next
@@ -379,17 +420,18 @@ function livePositions(snapshot, renderModel) {
   for (const item of snapshot.transports || []) {
     if (positions[item.id]) continue;
     const parentIds = item.interface_ids || [];
-    const parentXs = parentIds.map((id) => positions[id]).filter(Boolean).map((p) => p.x);
-    const anchorX = parentXs.length ? parentXs.reduce((sum, x) => sum + x, 0) / parentXs.length : 0;
-    const groupKey = String(Math.round(anchorX));
-    if (!transportGroups.has(groupKey)) transportGroups.set(groupKey, { anchorX: anchorX, items: [] });
+    const parents = parentIds.map((id) => positions[id]).filter(Boolean);
+    const anchorX = parents.length ? parents.reduce((sum, position) => sum + position.x, 0) / parents.length : 0;
+    const anchorY = parents.length ? parents.reduce((sum, position) => sum + position.y, 0) / parents.length : 170;
+    const groupKey = Math.round(anchorX) + ":" + Math.round(anchorY);
+    if (!transportGroups.has(groupKey)) transportGroups.set(groupKey, { anchorX: anchorX, anchorY: anchorY, items: [] });
     transportGroups.get(groupKey).items.push(item);
   }
   for (const group of transportGroups.values()) {
     group.items.forEach((item, index) => {
       positions[item.id] = {
         x: group.anchorX + (index - (group.items.length - 1) / 2) * 120,
-        y: 340,
+        y: group.anchorY + 160,
       };
     });
   }
@@ -415,7 +457,7 @@ function livePositions(snapshot, renderModel) {
       tierEdges.forEach((edge, index) => {
         positions[edge.target] = {
           x: anchor.x + (index - (tierEdges.length - 1) / 2) * 155,
-          y: 450 + (tier - 1) * 125,
+          y: anchor.y + 120 + (tier - 1) * 115,
         };
       });
     }
@@ -437,14 +479,25 @@ function rebuildLive(snapshot) {
   });
   cy.elements().remove();
   const els = [];
-  const root = snapshot.root;
-  els.push({ group: "nodes", data: { id: root.id, label: root.label, liveKind: "root", item: root }, classes: "live-root", position: positions[root.id] });
+  const roots = snapshot.reporter_roots || [snapshot.root];
+  const rootIds = new Set(roots.map((root) => root.id));
+  for (const root of roots) {
+    const role = root.primary ? "\nprimary reporter" : "\nreporter";
+    const rmapRecords = renderModel.rmapMatches[root.id] || [];
+    const rmapLabel = rmapRecords.length ? "\nRMAP matched" : "";
+    const label = root.label + (roots.length > 1 ? role : "") + rmapLabel;
+    let classes = "live-root" + (root.primary ? " primary" : " secondary");
+    if (rmapRecords.length) classes += " rmap-matched";
+    if (root.report_stale) classes += " stale";
+    els.push({ group: "nodes", data: { id: root.id, label: label, liveKind: "root", item: { ...root, rmap_records: rmapRecords } }, classes: classes, position: positions[root.id] });
+  }
   for (const item of snapshot.interfaces || []) {
     let classes = "live-interface" + liveInterfaceClass(item);
     if (item.path_only) classes += " path-only";
     els.push({ group: "nodes", data: { id: item.id, label: item.name, liveKind: "interface", item: item }, classes: classes, position: positions[item.id] });
   }
   for (const item of snapshot.transports || []) {
+    if (rootIds.has(item.id)) continue;
     const transportCounts = (snapshot.path_summary || {}).by_transport || {};
     const destinationCount = transportCounts[item.hash] || 0;
     const countLabel = destinationCount ? "\n" + destinationCount.toLocaleString() + " destinations" : "";
@@ -516,7 +569,9 @@ async function loadLiveState() {
     const query = new URLSearchParams();
     if (state.showLiveDestinationSummaries) query.set("include_paths", "true");
     if (state.showLiveRmap) query.set("include_rmap", "true");
-    const endpoint = "/api/live/reporters/" + encodeURIComponent(state.liveReporterId) + "/state";
+    const endpoint = state.liveReporterId === "all"
+      ? "/api/live/network"
+      : "/api/live/reporters/" + encodeURIComponent(state.liveReporterId) + "/state";
     const snapshot = await api.get(endpoint + (query.size ? "?" + query.toString() : ""));
     state.live = snapshot;
     updateLiveHealth(snapshot);
@@ -532,14 +587,14 @@ async function refreshLiveReporters() {
   const catalog = await api.get("/api/live/reporters");
   const reporters = catalog.reporters || [];
   state.liveReporters = reporters;
-  if (!reporters.some((item) => item.id === state.liveReporterId)) {
+  if (state.liveReporterId !== "all" && !reporters.some((item) => item.id === state.liveReporterId)) {
     const preferred = reporters.find((item) => item.local) || reporters[0];
-    state.liveReporterId = preferred ? preferred.id : null;
+    state.liveReporterId = preferred ? preferred.id : "all";
   }
   const select = document.getElementById("live-reporter");
   const signature = reporters.map((item) => item.id + ":" + item.stale).join("|");
   if (select.dataset.signature !== signature) {
-    select.innerHTML = reporters.map((item) =>
+    select.innerHTML = '<option value="all">All reporters (' + reporters.length + ")</option>" + reporters.map((item) =>
       '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.label) + (item.stale ? " (stale)" : "") + "</option>"
     ).join("");
     select.dataset.signature = signature;
@@ -578,13 +633,17 @@ function showLivePanel(el) {
   const row = (name, value) => '<div class="row"><label>' + escapeHtml(name) + '</label><span class="mono">' + escapeHtml(liveValue(value)) + "</span></div>";
   if (kind === "root") {
     title.textContent = item.label || "Local RNS";
-    const reporter = (state.live || {}).reporter || {};
-    body.innerHTML = row("Reporter ID", reporter.id) + row("Transport identity", item.transport_id) +
+    const reporter = ((state.live || {}).reporters || []).find((entry) => entry.id === item.reporter_id) || (state.live || {}).reporter || {};
+    const rmapRecords = item.rmap_records || [];
+    const rmapDetails = rmapRecords.length ? '<details class="section"><summary>Matched RMAP metadata (' + rmapRecords.length + ')</summary>' +
+      rmapRecords.map((record) => row("Advertised interface", record.name) + row("Type", record.type) +
+        row("Latitude", record.latitude) + row("Longitude", record.longitude)).join("") + "</details>" : "";
+    body.innerHTML = row("Reporter ID", item.reporter_id || reporter.id) + row("Role", item.primary ? "primary" : "contributing") + row("Transport identity", item.transport_id) +
       row("Report age", reporter.age_seconds === undefined ? "unknown" : reporter.age_seconds + " seconds") +
-      row("Mode", "read-only live observation");
+      row("Mode", "read-only live observation") + rmapDetails;
   } else if (kind === "interface") {
     title.textContent = item.name || "Interface";
-    body.innerHTML = row("Type", item.type) + row("Interface hash", item.interface_hash) + row("Mode", item.mode) +
+    body.innerHTML = row("Reporter", item.reporter_id) + row("Type", item.type) + row("Interface hash", item.interface_hash) + row("Mode", item.mode) +
       row("Online", item.status) + row("Peers", item.peers) + row("Bitrate", item.bitrate) + row("MTU", item.mtu) +
       row("Received bytes", item.rxb) + row("Transmitted bytes", item.txb) +
       (item.path_only ? '<div class="muted">This interface was reported by the path table but absent from the latest interface status.</div>' : "");
@@ -602,7 +661,7 @@ function showLivePanel(el) {
       rmapRecords.map((record) => row("Advertised interface", record.name) + row("Type", record.type) +
         row("Latitude", record.latitude) + row("Longitude", record.longitude)).join("") + "</details>" : "";
     title.textContent = "Observed next-hop transport";
-    body.innerHTML = row("Transport hash", item.hash) + row("Interface IDs", (item.interface_ids || []).join(", ")) +
+    body.innerHTML = row("Transport hash", item.hash) + row("Observed by", (item.observed_by || []).join(", ")) + row("Interface IDs", (item.interface_ids || []).join(", ")) +
       row("Known destinations", knownDestinationCount) + row("Hop distribution", distribution || "load path summaries to inspect") +
       '<div class="muted">The local path table supports this as a next hop. It does not reveal routers beyond it.</div>' + rmapDetails;
   } else if (kind === "rmap_transport") {
@@ -629,7 +688,7 @@ function showLivePanel(el) {
     title.textContent = "Destination summary";
     const hashes = item.sample_hashes.map((hash) => '<div class="mono">' + escapeHtml(hash) + "</div>").join("");
     const distribution = Object.keys(item.hop_distribution || {}).sort((a, b) => Number(a) - Number(b)).map((hops) => hops + " hops: " + item.hop_distribution[hops]).join(" · ");
-    body.innerHTML = row("Destinations", item.count) + row("Hop tier", item.hop_tier) + row("Exact distribution", distribution || item.hop_tier) +
+    body.innerHTML = row("Reporter", item.reporter_label || item.reporter_id) + row("Destinations", item.count) + row("Hop tier", item.hop_tier) + row("Exact distribution", distribution || item.hop_tier) +
       row("Unknown after next hop", item.unknown_hops) + row("Interface", item.interface) +
       '<details class="section"><summary>Destination hashes' + (item.count > item.sample_hashes.length ? " (first " + item.sample_hashes.length + ")" : "") + '</summary><div class="destination-hashes">' + hashes + "</div></details>";
   } else if (kind === "destination") {

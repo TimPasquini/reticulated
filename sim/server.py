@@ -187,6 +187,16 @@ def get_live_reporters():
     }
 
 
+@app.get("/api/live/network")
+def get_live_network(include_paths: bool = False, include_rmap: bool = False):
+    state = live_reports.network(
+        include_paths=include_paths, include_rmap=include_rmap
+    )
+    if state is None:
+        raise HTTPException(status_code=503, detail="no live reports collected yet")
+    return state
+
+
 @app.get("/api/live/reporters/{reporter_id}/state")
 def get_live_reporter_state(
     reporter_id: str, include_paths: bool = False, include_rmap: bool = False

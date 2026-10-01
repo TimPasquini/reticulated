@@ -101,11 +101,19 @@ The reporter gzip-compresses normalized `rnstatus -j`, `rnpath -t -j`, and
 mutating RNS commands. Reports are kept in memory and replaced atomically;
 after a server restart, each node repopulates its entry on its next interval.
 
-The Live RNS toolbar can switch between reporters. The reporter catalog also
-returns correlations when one reporter's transport identity is another
-reporter's observed next hop. Useful endpoints are:
+The default **All reporters** view draws one evidence graph. The server's local
+report is primary, transport identities shared between reports become the same
+graph node, and reporter-specific interfaces remain distinct. A reporter whose
+transport identity is an observed primary next hop can refine the primary path
+with its closer observation. A disconnected reporter cannot replace the
+primary's route merely because it is locally closer. Every retained destination
+identifies the reporter that observed it, and individual reporter views remain
+selectable for diagnosis.
+
+Useful endpoints are:
 
 - `GET /api/live/reporters`
+- `GET /api/live/network`
 - `GET /api/live/reporters/{id}/state`
 - `POST /api/live/reporters/{id}` (Bearer token required)
 

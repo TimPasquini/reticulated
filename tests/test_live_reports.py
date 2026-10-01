@@ -53,6 +53,84 @@ class LiveReportRegistryTests(unittest.TestCase):
             "observed_by": ["fedora"],
         }])
 
+    def test_network_unifies_reporter_roots_and_keeps_closest_path_observation(self):
+        fedora = snapshot("Fedora", observed=("patroon-hash",))
+        fedora["interfaces"] = [{"id": "interface:lan", "name": "Garage LAN"}]
+        fedora["transports"][0]["interface_ids"] = ["interface:lan"]
+        fedora["destinations"] = [{
+            "id": "destination:shared", "hash": "shared", "hops": 3,
+            "via": "patroon-hash", "interface_id": "interface:lan", "interface": "Garage LAN",
+        }]
+        fedora["edges"] = [
+            {"id": "edge:root:lan", "source": fedora["root"]["id"], "target": "interface:lan", "kind": "observed_interface"},
+            {"id": "edge:lan:patroon", "source": "interface:lan", "target": "transport:patroon-hash", "kind": "observed_next_hop"},
+            {"id": "edge:patroon:shared", "source": "transport:patroon-hash", "target": "destination:shared", "kind": "known_path", "hops": 3, "unknown_hops": 2},
+        ]
+
+        patroon = snapshot("Patroon", transport_id="patroon-hash", observed=("backbone-hop",))
+        patroon["interfaces"] = [{"id": "interface:backbone", "name": "NYC Backbone"}]
+        patroon["transports"][0]["interface_ids"] = ["interface:backbone"]
+        patroon["destinations"] = [{
+            "id": "destination:shared", "hash": "shared", "hops": 2,
+            "via": "backbone-hop", "interface_id": "interface:backbone", "interface": "NYC Backbone",
+        }]
+        patroon["edges"] = [
+            {"id": "edge:root:backbone", "source": patroon["root"]["id"], "target": "interface:backbone", "kind": "observed_interface"},
+            {"id": "edge:backbone:hop", "source": "interface:backbone", "target": "transport:backbone-hop", "kind": "observed_next_hop"},
+            {"id": "edge:hop:shared", "source": "transport:backbone-hop", "target": "destination:shared", "kind": "known_path", "hops": 2, "unknown_hops": 1},
+        ]
+
+        registry = LiveReportRegistry()
+        registry.update("patroon", patroon, local=True)
+        registry.update("fedora", fedora)
+        network = registry.network(include_paths=True)
+
+        self.assertEqual(network["root"]["id"], "transport:patroon-hash")
+        self.assertEqual(
+            {root["id"] for root in network["reporter_roots"]},
+            {"transport:patroon-hash", "reporter:fedora"},
+        )
+        self.assertEqual([item["hash"] for item in network["transports"]], ["backbone-hop"])
+        self.assertEqual(len(network["destinations"]), 1)
+        self.assertEqual(network["destinations"][0]["reporter_id"], "patroon")
+        self.assertEqual(network["destinations"][0]["hops"], 2)
+        self.assertTrue(any(
+            edge["source"] == "reporter:fedora" and edge["kind"] == "observed_interface"
+            for edge in network["edges"]
+        ))
+        self.assertTrue(any(
+            edge["target"] == "transport:patroon-hash" and edge["kind"] == "observed_next_hop"
+            for edge in network["edges"]
+        ))
+
+    def test_connected_transport_reporter_refines_primary_path(self):
+        patroon = snapshot("Patroon", transport_id="patroon", observed=("vehicle",))
+        patroon["destinations"] = [{
+            "id": "destination:d", "hash": "d", "hops": 3, "via": "vehicle",
+            "interface_id": "interface:radio", "interface": "LoRa",
+        }]
+        patroon["edges"] = [{
+            "id": "edge:vehicle:d", "source": "transport:vehicle", "target": "destination:d",
+            "kind": "known_path", "hops": 3, "unknown_hops": 2,
+        }]
+        vehicle = snapshot("Vehicle", transport_id="vehicle", observed=("radio-hop",))
+        vehicle["destinations"] = [{
+            "id": "destination:d", "hash": "d", "hops": 2, "via": "radio-hop",
+            "interface_id": "interface:radio", "interface": "LoRa",
+        }]
+        vehicle["edges"] = [{
+            "id": "edge:radio:d", "source": "transport:radio-hop", "target": "destination:d",
+            "kind": "known_path", "hops": 2, "unknown_hops": 1,
+        }]
+
+        registry = LiveReportRegistry()
+        registry.update("patroon", patroon, local=True)
+        registry.update("vehicle", vehicle)
+        network = registry.network(include_paths=True)
+
+        self.assertEqual(network["destinations"][0]["reporter_id"], "vehicle")
+        self.assertEqual(network["destinations"][0]["hops"], 2)
+
     def test_rejects_invalid_ids_and_payloads(self):
         with self.assertRaises(ValueError):
             validate_reporter_id("../bad")
