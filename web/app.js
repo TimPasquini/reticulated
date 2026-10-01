@@ -40,6 +40,7 @@ const state = {
   showLiveDestinationSummaries: false,
   showLiveRmap: false,
   liveLayoutPending: true,
+  liveLayoutRunning: false,
   liveSlots: {},
   liveNextSlot: {},
   topology: { nodes: {}, links: {} },
@@ -518,6 +519,7 @@ function updateLiveHealth(snapshot) {
 
 async function loadLiveState() {
   if (state.uiMode !== "live") return;
+  if (state.liveLayoutRunning) return;
   try {
     const query = new URLSearchParams();
     if (state.showLiveDestinationSummaries) query.set("include_paths", "true");
@@ -1353,24 +1355,52 @@ function setupHold(btn, ms, action) {
 setupHold(document.getElementById("btn-reset"), 3000, () => api.post("/api/reset"));
 
 function runLiveLayout(animate) {
-  if (!state.live || !cy.nodes().length) return;
-  const root = cy.getElementById(state.live.root.id);
-  const layout = cy.layout({
-    name: "breadthfirst",
-    directed: true,
-    roots: root,
-    circle: false,
-    grid: true,
-    avoidOverlap: true,
-    nodeDimensionsIncludeLabels: true,
-    spacingFactor: 1.35,
-    padding: 70,
-    fit: true,
-    animate: animate,
-    animationDuration: animate ? 650 : 0,
+  if (!state.live || !cy.nodes().length || state.liveLayoutRunning) return;
+  state.liveLayoutRunning = true;
+
+  // Pass 1 uses fCoSE's spectral stage to quickly pull apart the hand-seeded
+  // rows and give the force solver a topology-aware starting point.
+  const detangle = cy.layout({
+    name: "fcose",
+    quality: "draft",
+    randomize: true,
+    animate: false,
+    fit: false,
+    samplingType: true,
+    sampleSize: 25,
+    nodeSeparation: 140,
+    packComponents: false,
   });
-  layout.one("layoutstop", () => { state.liveLayoutPending = false; });
-  layout.run();
+  detangle.one("layoutstop", () => {
+    // Pass 2 retains the spectral positions and performs a bounded CoSE
+    // force refinement. Keeping this pass bounded avoids freezing the UI on
+    // large path tables while still relaxing crossings and overlaps.
+    const refine = cy.layout({
+      name: "cose",
+      randomize: false,
+      animate: animate,
+      animationDuration: animate ? 700 : 0,
+      fit: true,
+      padding: 70,
+      nodeDimensionsIncludeLabels: true,
+      nodeOverlap: 28,
+      nodeRepulsion: 40000,
+      idealEdgeLength: 125,
+      edgeElasticity: 100,
+      nestingFactor: 1.2,
+      gravity: 0.8,
+      numIter: 1000,
+      initialTemp: 300,
+      coolingFactor: 0.96,
+      minTemp: 1,
+    });
+    refine.one("layoutstop", () => {
+      state.liveLayoutRunning = false;
+      state.liveLayoutPending = false;
+    });
+    refine.run();
+  });
+  detangle.run();
 }
 
 function runLayout() {
@@ -1559,7 +1589,17 @@ document.getElementById("chat-close").onclick = closeChat;
 document.getElementById("chat-send").onclick = sendChat;
 document.getElementById("chat-text").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
 
-loadState();
+const initialQuery = new URLSearchParams(location.search);
+if (initialQuery.get("rmap") === "true") {
+  state.showLiveRmap = true;
+  document.getElementById("btn-live-rmap").textContent = "Hide RMAP discovery";
+}
+if (initialQuery.get("paths") === "true") {
+  state.showLiveDestinationSummaries = true;
+  document.getElementById("btn-live-destinations").textContent = "Hide path summaries";
+}
+if (initialQuery.get("mode") === "live") setOperatingMode("live");
+else loadState();
 connectWs();
 updateTrafficBox();
 setInterval(loadLiveState, 5000);
