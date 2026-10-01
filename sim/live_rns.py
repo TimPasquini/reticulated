@@ -66,6 +66,7 @@ class LiveRNSProvider:
         self._lock = threading.Lock()
         self._last_status: dict[str, Any] | None = None
         self._last_paths: list[dict[str, Any]] | None = None
+        self._last_discovered: list[dict[str, Any]] | None = None
         self._state = self._empty_state()
 
     def _empty_state(self) -> dict[str, Any]:
@@ -77,10 +78,12 @@ class LiveRNSProvider:
             "interfaces": [],
             "transports": [],
             "destinations": [],
+            "rmap_interfaces": [],
             "edges": [],
             "health": {
                 "rnstatus": {"ok": False, "error": "not collected yet"},
                 "rnpath": {"ok": False, "error": "not collected yet"},
+                "rmap": {"ok": False, "error": "not collected yet"},
             },
         }
 
@@ -123,12 +126,20 @@ class LiveRNSProvider:
         status, status_health = self._read_json(self._command(config.RNSTATUS_PATH, "-j"))
         if status_health["ok"]:
             paths, path_health = self._read_json(self._command(config.RNPATH_PATH, "-t", "-j"))
+            discovered, rmap_health = self._read_json(
+                self._command(config.RNSTATUS_PATH, "-d", "-j")
+            )
         else:
             # Unlike rnstatus, rnpath can create a standalone RNS instance when
             # no shared daemon exists. Do not let an observational poller claim
             # the shared-instance socket during daemon startup or maintenance.
             paths = None
+            discovered = None
             path_health = {
+                "ok": False,
+                "error": "skipped because rnstatus could not reach the shared instance",
+            }
+            rmap_health = {
                 "ok": False,
                 "error": "skipped because rnstatus could not reach the shared instance",
             }
@@ -147,15 +158,25 @@ class LiveRNSProvider:
                 path_health = {"ok": False, "error": "expected a JSON array of path objects"}
             else:
                 self._last_paths = paths
+        if rmap_health["ok"]:
+            if not isinstance(discovered, list) or not all(isinstance(item, dict) for item in discovered):
+                rmap_health = {"ok": False, "error": "expected a JSON array of discovered interface objects"}
+            else:
+                self._last_discovered = discovered
 
         normalized = self.normalize(
             self._last_status or {"interfaces": []},
             self._last_paths or [],
             label=self.label,
+            discovered=self._last_discovered or [],
         )
         normalized["collected_at"] = time.time()
         normalized["stale"] = not (status_health["ok"] and path_health["ok"])
-        normalized["health"] = {"rnstatus": status_health, "rnpath": path_health}
+        normalized["health"] = {
+            "rnstatus": status_health,
+            "rnpath": path_health,
+            "rmap": rmap_health,
+        }
         with self._lock:
             self._state = normalized
             return dict(normalized)
@@ -165,7 +186,9 @@ class LiveRNSProvider:
             # JSON round-tripping provides a small and safe deep copy for API use.
             return json.loads(json.dumps(self._state))
 
-    def topology_snapshot(self, *, include_paths: bool = False) -> dict[str, Any]:
+    def topology_snapshot(
+        self, *, include_paths: bool = False, include_rmap: bool = False
+    ) -> dict[str, Any]:
         """Return the observed graph, omitting path-table fan-out by default.
 
         The complete path table remains available on explicit request, but it is
@@ -184,15 +207,30 @@ class LiveRNSProvider:
             "destination_count": len(destinations),
             "by_transport": counts_by_transport,
         }
+        rmap_interfaces = state.get("rmap_interfaces", [])
+        state["rmap_summary"] = {
+            "interface_count": len(rmap_interfaces),
+            "transport_count": len(
+                {item.get("transport_id") for item in rmap_interfaces if item.get("transport_id")}
+            ),
+        }
         if not include_paths:
             state["destinations"] = []
             state["edges"] = [
                 edge for edge in state.get("edges", []) if edge.get("kind") != "known_path"
             ]
+        if not include_rmap:
+            state["rmap_interfaces"] = []
         return state
 
     @staticmethod
-    def normalize(status: dict[str, Any], paths: list[dict[str, Any]], *, label: str) -> dict[str, Any]:
+    def normalize(
+        status: dict[str, Any],
+        paths: list[dict[str, Any]],
+        *,
+        label: str,
+        discovered: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """Normalize RNS JSON without asserting topology RNS did not report."""
         transport_id = status.get("transport_id")
         root_id = f"instance:{transport_id}" if transport_id else "instance:local"
@@ -329,6 +367,31 @@ class LiveRNSProvider:
                 "unknown_hops": unknown_hops,
             })
 
+        rmap_interfaces = []
+        for raw in discovered or []:
+            transport_id = raw.get("transport_id")
+            discovery_hash = raw.get("discovery_hash")
+            if not transport_id or not discovery_hash:
+                continue
+            rmap_interfaces.append({
+                "id": f"rmap-interface:{discovery_hash}",
+                "discovery_hash": discovery_hash,
+                "transport_id": transport_id,
+                "name": raw.get("name") or "Discovered interface",
+                "type": raw.get("type"),
+                "status": raw.get("status"),
+                "hops": _as_int(raw.get("hops")),
+                "last_heard": raw.get("last_heard"),
+                "latitude": raw.get("latitude"),
+                "longitude": raw.get("longitude"),
+                "height": raw.get("height"),
+                "reachable_on": raw.get("reachable_on"),
+                "port": raw.get("port"),
+                "frequency": raw.get("frequency"),
+                "bandwidth": raw.get("bandwidth"),
+                "raw": raw,
+            })
+
         return {
             "mode": "live_rns",
             "collected_at": None,
@@ -337,6 +400,7 @@ class LiveRNSProvider:
             "interfaces": interfaces,
             "transports": list(transports.values()),
             "destinations": list(destinations.values()),
+            "rmap_interfaces": rmap_interfaces,
             "edges": edges,
             "health": {},
         }

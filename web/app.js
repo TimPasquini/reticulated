@@ -38,6 +38,7 @@ const state = {
   uiMode: "simulation",
   live: null,
   showLiveDestinationSummaries: false,
+  showLiveRmap: false,
   liveSlots: {},
   liveNextSlot: {},
   topology: { nodes: {}, links: {} },
@@ -163,6 +164,16 @@ const cy = cytoscape({
       "label": "data(label)", "color": "#eaffef", "text-valign": "center", "text-halign": "center",
       "font-size": 9, "text-wrap": "wrap", "text-max-width": 100, "text-outline-color": "#11151c", "text-outline-width": 2,
     }},
+    { selector: "node.live-rmap-transport", style: {
+      "shape": "hexagon", "width": 54, "height": 54, "background-color": "#245f64",
+      "label": "data(label)", "color": "#dffcff", "text-valign": "center", "text-halign": "center",
+      "font-size": 9, "text-wrap": "wrap", "text-max-width": 110, "border-width": 2, "border-color": "#56b9bd",
+    }},
+    { selector: "node.live-rmap-interface", style: {
+      "shape": "round-rectangle", "width": 132, "height": 44, "background-color": "#244a55",
+      "label": "data(label)", "color": "#dffcff", "text-valign": "center", "text-halign": "center",
+      "font-size": 9, "text-wrap": "wrap", "text-max-width": 126, "border-width": 2, "border-style": "dashed", "border-color": "#56b9bd",
+    }},
     { selector: "node.live-destination", style: {
       "shape": "ellipse", "width": 34, "height": 34, "background-color": "#687386",
       "label": "data(label)", "color": "#d7dde5", "text-valign": "bottom", "text-margin-y": 7,
@@ -178,6 +189,11 @@ const cy = cytoscape({
     { selector: "edge.live-incomplete", style: {
       "line-color": "#d89b45", "line-style": "dashed", "target-arrow-shape": "triangle", "target-arrow-color": "#d89b45",
       "label": "data(label)", "font-size": 9, "color": "#e7b96b", "text-background-color": "#11151c", "text-background-opacity": 0.85,
+      "text-background-padding": 2, "curve-style": "bezier",
+    }},
+    { selector: "edge.live-discovered", style: {
+      "line-color": "#56b9bd", "line-style": "dashed", "target-arrow-shape": "triangle", "target-arrow-color": "#56b9bd",
+      "label": "data(label)", "font-size": 9, "color": "#9fdbde", "text-background-color": "#11151c", "text-background-opacity": 0.85,
       "text-background-padding": 2, "curve-style": "bezier",
     }},
     { selector: "edge.announce-flash", style: { "line-color": "#ffd34d", "width": 5 }},
@@ -347,11 +363,56 @@ function livePositions(snapshot, renderModel) {
     };
   }
 
-  // Next hops without destinations still belong near their first interface.
+  // Spread next hops around the interfaces that observed them. Several next
+  // hops can share an interface, so assigning all of them to its exact x/y
+  // position would stack the nodes on top of each other.
+  const transportGroups = new Map();
   for (const item of snapshot.transports || []) {
     if (positions[item.id]) continue;
-    const parent = positions[(item.interface_ids || [])[0]];
-    positions[item.id] = parent ? { x: parent.x, y: 360 } : { x: 0, y: 360 };
+    const parentIds = item.interface_ids || [];
+    const parentXs = parentIds.map((id) => positions[id]).filter(Boolean).map((p) => p.x);
+    const anchorX = parentXs.length ? parentXs.reduce((sum, x) => sum + x, 0) / parentXs.length : 0;
+    const groupKey = String(Math.round(anchorX));
+    if (!transportGroups.has(groupKey)) transportGroups.set(groupKey, { anchorX: anchorX, items: [] });
+    transportGroups.get(groupKey).items.push(item);
+  }
+  for (const group of transportGroups.values()) {
+    group.items.forEach((item, index) => {
+      positions[item.id] = {
+        x: group.anchorX + (index - (group.items.length - 1) / 2) * 120,
+        y: 360,
+      };
+    });
+  }
+
+  // RMAP records are announced interface metadata, not direct adjacency. Keep
+  // them in a separate lower band and group each interface under its transport.
+  const localTransportIds = new Set((snapshot.transports || []).map((item) => item.id));
+  const rmapByTransport = new Map();
+  for (const item of snapshot.rmap_interfaces || []) {
+    const transportId = "transport:" + item.transport_id;
+    if (!rmapByTransport.has(transportId)) rmapByTransport.set(transportId, []);
+    rmapByTransport.get(transportId).push(item);
+  }
+  const newRmapTransports = Array.from(rmapByTransport.keys()).filter((id) => !localTransportIds.has(id)).sort();
+  const rmapColumns = 5;
+  newRmapTransports.forEach((id, index) => {
+    const column = index % rmapColumns;
+    const row = Math.floor(index / rmapColumns);
+    positions[id] = {
+      x: (column - (Math.min(rmapColumns, newRmapTransports.length) - 1) / 2) * 260,
+      y: 540 + row * 260,
+    };
+  });
+  for (const [transportId, items] of rmapByTransport) {
+    const parent = positions[transportId] || { x: 0, y: 540 };
+    const childY = localTransportIds.has(transportId) ? 700 : parent.y + 145;
+    items.sort((a, b) => a.id.localeCompare(b.id)).forEach((item, index) => {
+      positions[item.id] = {
+        x: parent.x + (index - (items.length - 1) / 2) * 150,
+        y: childY,
+      };
+    });
   }
   return positions;
 }
@@ -360,9 +421,14 @@ function rebuildLive(snapshot) {
   const hadLiveGraph = cy.nodes(".live-root").length > 0;
   const oldPan = { ...cy.pan() };
   const oldZoom = cy.zoom();
+  const oldPositions = {};
+  cy.nodes().forEach((node) => { oldPositions[node.id()] = { ...node.position() }; });
   const selectedIds = cy.$(":selected").map((element) => element.id());
   const renderModel = liveRenderModel(snapshot);
   const positions = livePositions(snapshot, renderModel);
+  Object.keys(oldPositions).forEach((id) => {
+    if (positions[id]) positions[id] = oldPositions[id];
+  });
   cy.elements().remove();
   const els = [];
   const root = snapshot.root;
@@ -377,6 +443,26 @@ function rebuildLive(snapshot) {
     const destinationCount = transportCounts[item.hash] || 0;
     const countLabel = destinationCount ? "\n" + destinationCount.toLocaleString() + " destinations" : "";
     els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash) + countLabel, liveKind: "transport", item: item }, classes: "live-transport", position: positions[item.id] });
+  }
+  const existingTransportIds = new Set((snapshot.transports || []).map((item) => item.id));
+  const rmapByTransport = new Map();
+  for (const item of snapshot.rmap_interfaces || []) {
+    const transportId = "transport:" + item.transport_id;
+    if (!rmapByTransport.has(transportId)) rmapByTransport.set(transportId, []);
+    rmapByTransport.get(transportId).push(item);
+  }
+  for (const [transportId, items] of rmapByTransport) {
+    if (!existingTransportIds.has(transportId)) {
+      const hops = items.map((item) => item.hops).filter((value) => value !== null && value !== undefined);
+      const nearestHops = hops.length ? Math.min(...hops) : null;
+      const transportItem = { id: transportId, hash: items[0].transport_id, rmap: true, hops: nearestHops };
+      els.push({ group: "nodes", data: { id: transportId, label: "RMAP transport\n" + shortHash(items[0].transport_id), liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport", position: positions[transportId] });
+      els.push({ group: "edges", data: { id: "edge:rmap:" + root.id + ":" + transportId, source: root.id, target: transportId, label: nearestHops === null ? "RMAP announce" : "RMAP announce · " + nearestHops + " hops", liveKind: "edge", item: { kind: "rmap_discovery", certainty: "advertised" } }, classes: "live-discovered" });
+    }
+    for (const item of items) {
+      els.push({ group: "nodes", data: { id: item.id, label: item.name + "\n" + (item.type || "interface"), liveKind: "rmap_interface", item: item }, classes: "live-rmap-interface", position: positions[item.id] });
+      els.push({ group: "edges", data: { id: "edge:" + transportId + ":" + item.id, source: transportId, target: item.id, label: "advertised interface", liveKind: "edge", item: { kind: "rmap_advertisement", certainty: "advertised" } }, classes: "live-discovered" });
+    }
   }
   for (const entry of renderModel.destinationNodes) {
     const item = entry.item;
@@ -420,17 +506,20 @@ function updateLiveHealth(snapshot) {
     health.textContent = "Stale/partial · " + failed.map((key) => key + ": " + sources[key].error).join(" · ");
   } else {
     const destinationCount = (snapshot.path_summary || {}).destination_count ?? (snapshot.destinations || []).length;
+    const rmapCount = (snapshot.rmap_summary || {}).interface_count || 0;
     health.textContent = (snapshot.interfaces || []).length + " interfaces · " +
       (snapshot.transports || []).length + " next hops · " +
-      destinationCount + " known paths · refreshed " + new Date(snapshot.collected_at * 1000).toLocaleTimeString();
+      destinationCount + " known paths · " + rmapCount + " RMAP interfaces · refreshed " + new Date(snapshot.collected_at * 1000).toLocaleTimeString();
   }
 }
 
 async function loadLiveState() {
   if (state.uiMode !== "live") return;
   try {
-    const pathQuery = state.showLiveDestinationSummaries ? "?include_paths=true" : "";
-    const snapshot = await api.get("/api/live/state" + pathQuery);
+    const query = new URLSearchParams();
+    if (state.showLiveDestinationSummaries) query.set("include_paths", "true");
+    if (state.showLiveRmap) query.set("include_rmap", "true");
+    const snapshot = await api.get("/api/live/state" + (query.size ? "?" + query.toString() : ""));
     state.live = snapshot;
     updateLiveHealth(snapshot);
     rebuildLive(snapshot);
@@ -464,7 +553,7 @@ function showLivePanel(el) {
     title.textContent = "Live RNS details";
     body.innerHTML = '<div class="muted">Read-only local Reticulum observations. Select an item for details.</div>' +
       '<div class="live-key"><span class="live-swatch"></span><span class="muted">solid: directly supported relationship</span>' +
-      '<span class="live-swatch incomplete"></span><span class="muted">dashed: incomplete path; intermediate transports are unknown</span></div>';
+      '<span class="live-swatch incomplete"></span><span class="muted">dashed: incomplete path or RMAP-advertised relationship</span></div>';
     return;
   }
   const item = el.data("item") || {};
@@ -481,6 +570,7 @@ function showLivePanel(el) {
       (item.path_only ? '<div class="muted">This interface was reported by the path table but absent from the latest interface status.</div>' : "");
   } else if (kind === "transport") {
     const destinations = (state.live.destinations || []).filter((destination) => destination.via === item.hash);
+    const knownDestinationCount = ((state.live.path_summary || {}).by_transport || {})[item.hash] || destinations.length;
     const hopCounts = {};
     destinations.forEach((destination) => {
       const key = destination.hops === null || destination.hops === undefined ? "unknown" : destination.hops;
@@ -489,8 +579,19 @@ function showLivePanel(el) {
     const distribution = Object.keys(hopCounts).sort((a, b) => Number(a) - Number(b)).map((hops) => hops + " hops: " + hopCounts[hops]).join(" · ");
     title.textContent = "Observed next-hop transport";
     body.innerHTML = row("Transport hash", item.hash) + row("Interface IDs", (item.interface_ids || []).join(", ")) +
-      row("Known destinations", destinations.length) + row("Hop distribution", distribution || "none") +
+      row("Known destinations", knownDestinationCount) + row("Hop distribution", distribution || "load path summaries to inspect") +
       '<div class="muted">The local path table supports this as a next hop. It does not reveal routers beyond it.</div>';
+  } else if (kind === "rmap_transport") {
+    title.textContent = "RMAP-discovered transport";
+    body.innerHTML = row("Transport hash", item.hash) + row("Announced hops", item.hops) +
+      '<div class="muted">Learned from an RMAP interface-discovery announce. This is not evidence of direct adjacency.</div>';
+  } else if (kind === "rmap_interface") {
+    title.textContent = item.name || "RMAP-discovered interface";
+    body.innerHTML = row("Transport hash", item.transport_id) + row("Type", item.type) + row("Status", item.status) +
+      row("Announced hops", item.hops) + row("Last heard", item.last_heard) + row("Reachable on", item.reachable_on) +
+      row("Port", item.port) + row("Latitude", item.latitude) + row("Longitude", item.longitude) +
+      row("Frequency", item.frequency) + row("Bandwidth", item.bandwidth) +
+      '<div class="muted">Advertised discovery metadata; coordinates are shown only when explicitly supplied by the announcer.</div>';
   } else if (kind === "destination_group") {
     title.textContent = "Destination summary";
     const hashes = item.sample_hashes.map((hash) => '<div class="mono">' + escapeHtml(hash) + "</div>").join("");
@@ -992,7 +1093,7 @@ cy.on("tap", "node.host", (e) => {
 });
 
 cy.on("tap", "node.medium", (e) => { showPanel(e.target); });
-cy.on("tap", "node.live-root, node.live-interface, node.live-transport, node.live-destination, node.live-destination-group", (e) => { showPanel(e.target); });
+cy.on("tap", "node.live-root, node.live-interface, node.live-transport, node.live-rmap-transport, node.live-rmap-interface, node.live-destination, node.live-destination-group", (e) => { showPanel(e.target); });
 cy.on("tap", (e) => { if (e.target === cy) showPanel(null); });
 
 cy.on("dragfree", "node.host", (e) => {
@@ -1010,6 +1111,11 @@ document.getElementById("btn-start").onclick = () => api.post("/api/start");
 document.getElementById("btn-stop").onclick = () => api.post("/api/stop");
 document.getElementById("mode-simulation").onclick = () => setOperatingMode("simulation");
 document.getElementById("mode-live").onclick = () => setOperatingMode("live");
+document.getElementById("btn-live-rmap").onclick = () => {
+  state.showLiveRmap = !state.showLiveRmap;
+  document.getElementById("btn-live-rmap").textContent = state.showLiveRmap ? "Hide RMAP discovery" : "Show RMAP discovery";
+  loadLiveState();
+};
 document.getElementById("btn-live-destinations").onclick = () => {
   state.showLiveDestinationSummaries = !state.showLiveDestinationSummaries;
   document.getElementById("btn-live-destinations").textContent = state.showLiveDestinationSummaries ? "Hide path summaries" : "Show path summaries";

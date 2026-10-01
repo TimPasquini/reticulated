@@ -61,6 +61,20 @@ PATHS = [
     },
 ]
 
+DISCOVERED = [{
+    "discovery_hash": "rmap-interface-a",
+    "transport_id": "rmap-transport-a",
+    "name": "Published LoRa",
+    "type": "RNodeInterface",
+    "status": "available",
+    "hops": 3,
+    "last_heard": 1234,
+    "latitude": 40.0,
+    "longitude": -75.0,
+    "frequency": 914875000,
+    "bandwidth": 125000,
+}]
+
 
 class LiveRNSNormalizationTests(unittest.TestCase):
     def test_normalizes_sanitized_patroon_1_5_5_capture(self):
@@ -113,20 +127,37 @@ class LiveRNSNormalizationTests(unittest.TestCase):
         self.assertEqual(len(state["interfaces"]), 1)
         self.assertTrue(state["interfaces"][0]["path_only"])
 
+    def test_normalizes_rmap_discovery_without_claiming_adjacency(self):
+        state = LiveRNSProvider.normalize(
+            STATUS, PATHS, label="Patroon", discovered=DISCOVERED
+        )
+
+        self.assertEqual(len(state["rmap_interfaces"]), 1)
+        item = state["rmap_interfaces"][0]
+        self.assertEqual(item["id"], "rmap-interface:rmap-interface-a")
+        self.assertEqual(item["transport_id"], "rmap-transport-a")
+        self.assertEqual(item["latitude"], 40.0)
+        self.assertFalse(any(edge.get("target") == item["id"] for edge in state["edges"]))
+
 
 class LiveRNSCollectionTests(unittest.TestCase):
     def test_default_topology_snapshot_omits_destination_fanout(self):
         provider = LiveRNSProvider(label="Patroon")
-        provider._state = provider.normalize(STATUS, PATHS, label="Patroon")
+        provider._state = provider.normalize(
+            STATUS, PATHS, label="Patroon", discovered=DISCOVERED
+        )
 
         topology = provider.topology_snapshot()
-        full = provider.topology_snapshot(include_paths=True)
+        full = provider.topology_snapshot(include_paths=True, include_rmap=True)
 
         self.assertEqual(topology["destinations"], [])
         self.assertFalse(any(edge["kind"] == "known_path" for edge in topology["edges"]))
         self.assertEqual(topology["path_summary"]["destination_count"], 2)
         self.assertEqual(topology["path_summary"]["by_transport"], {"transport-x": 2})
+        self.assertEqual(topology["rmap_interfaces"], [])
+        self.assertEqual(topology["rmap_summary"]["interface_count"], 1)
         self.assertEqual(len(full["destinations"]), 2)
+        self.assertEqual(len(full["rmap_interfaces"]), 1)
         self.assertEqual(len([edge for edge in full["edges"] if edge["kind"] == "known_path"]), 2)
 
     def test_last_good_data_survives_temporary_command_failure(self):
@@ -134,6 +165,7 @@ class LiveRNSCollectionTests(unittest.TestCase):
             [
                 SimpleNamespace(returncode=0, stdout=json.dumps(STATUS), stderr=""),
                 SimpleNamespace(returncode=0, stdout=json.dumps(PATHS), stderr=""),
+                SimpleNamespace(returncode=0, stdout=json.dumps(DISCOVERED), stderr=""),
                 subprocess.TimeoutExpired([config.RNSTATUS_PATH, "-j"], 1),
             ]
         )
