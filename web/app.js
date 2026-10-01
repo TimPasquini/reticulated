@@ -39,6 +39,7 @@ const state = {
   live: null,
   showLiveDestinationSummaries: false,
   showLiveRmap: false,
+  liveLayoutPending: true,
   liveSlots: {},
   liveNextSlot: {},
   topology: { nodes: {}, links: {} },
@@ -188,14 +189,16 @@ const cy = cytoscape({
     { selector: "edge.live-observed", style: { "line-color": "#5b8196", "target-arrow-shape": "triangle", "target-arrow-color": "#5b8196", "arrow-scale": 0.7 }},
     { selector: "edge.live-incomplete", style: {
       "line-color": "#d89b45", "line-style": "dashed", "target-arrow-shape": "triangle", "target-arrow-color": "#d89b45",
-      "label": "data(label)", "font-size": 9, "color": "#e7b96b", "text-background-color": "#11151c", "text-background-opacity": 0.85,
+      "label": "", "font-size": 9, "color": "#e7b96b", "text-background-color": "#11151c", "text-background-opacity": 0.85,
       "text-background-padding": 2, "curve-style": "bezier",
     }},
+    { selector: "edge.live-incomplete:selected", style: { "label": "data(label)" }},
     { selector: "edge.live-discovered", style: {
       "line-color": "#56b9bd", "line-style": "dashed", "target-arrow-shape": "triangle", "target-arrow-color": "#56b9bd",
-      "label": "data(label)", "font-size": 9, "color": "#9fdbde", "text-background-color": "#11151c", "text-background-opacity": 0.85,
+      "label": "", "font-size": 9, "color": "#9fdbde", "text-background-color": "#11151c", "text-background-opacity": 0.85,
       "text-background-padding": 2, "curve-style": "bezier",
     }},
+    { selector: "edge.live-discovered:selected", style: { "label": "data(label)" }},
     { selector: "edge.announce-flash", style: { "line-color": "#ffd34d", "width": 5 }},
     { selector: "edge.route", style: { "line-color": "#ff9d3c", "width": 5 }},
     { selector: "node.route", style: { "border-color": "#ff9d3c", "border-width": 5 }},
@@ -456,7 +459,8 @@ function rebuildLive(snapshot) {
       const hops = items.map((item) => item.hops).filter((value) => value !== null && value !== undefined);
       const nearestHops = hops.length ? Math.min(...hops) : null;
       const transportItem = { id: transportId, hash: items[0].transport_id, rmap: true, hops: nearestHops };
-      els.push({ group: "nodes", data: { id: transportId, label: "RMAP transport\n" + shortHash(items[0].transport_id), liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport", position: positions[transportId] });
+      const hopLabel = nearestHops === null ? "" : "\n" + nearestHops + " hop" + (nearestHops === 1 ? "" : "s");
+      els.push({ group: "nodes", data: { id: transportId, label: "RMAP transport\n" + shortHash(items[0].transport_id) + hopLabel, liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport", position: positions[transportId] });
       els.push({ group: "edges", data: { id: "edge:rmap:" + root.id + ":" + transportId, source: root.id, target: transportId, label: nearestHops === null ? "RMAP announce" : "RMAP announce · " + nearestHops + " hops", liveKind: "edge", item: { kind: "rmap_discovery", certainty: "advertised" } }, classes: "live-discovered" });
     }
     for (const item of items) {
@@ -482,12 +486,10 @@ function rebuildLive(snapshot) {
     });
   }
   cy.add(els);
-  if (hadLiveGraph) {
+  const shouldAutoLayout = state.liveLayoutPending || !hadLiveGraph;
+  if (hadLiveGraph && !shouldAutoLayout) {
     cy.zoom(oldZoom);
     cy.pan(oldPan);
-  } else {
-    cy.zoom(1);
-    cy.center(cy.getElementById(root.id));
   }
   let restoredSelection = null;
   selectedIds.forEach((id) => {
@@ -495,6 +497,7 @@ function rebuildLive(snapshot) {
     if (element.nonempty()) { element.select(); restoredSelection = element; }
   });
   if (restoredSelection) showPanel(restoredSelection);
+  if (shouldAutoLayout) requestAnimationFrame(() => runLiveLayout(true));
 }
 
 function updateLiveHealth(snapshot) {
@@ -538,7 +541,7 @@ function setOperatingMode(mode) {
   document.getElementById("mode-live").classList.toggle("active", live);
   state.trafficPick = [];
   showPanel(null);
-  if (live) loadLiveState();
+  if (live) { state.liveLayoutPending = true; loadLiveState(); }
   else { rebuild(); updateTrafficBox(); }
 }
 
@@ -1113,11 +1116,13 @@ document.getElementById("mode-simulation").onclick = () => setOperatingMode("sim
 document.getElementById("mode-live").onclick = () => setOperatingMode("live");
 document.getElementById("btn-live-rmap").onclick = () => {
   state.showLiveRmap = !state.showLiveRmap;
+  state.liveLayoutPending = true;
   document.getElementById("btn-live-rmap").textContent = state.showLiveRmap ? "Hide RMAP discovery" : "Show RMAP discovery";
   loadLiveState();
 };
 document.getElementById("btn-live-destinations").onclick = () => {
   state.showLiveDestinationSummaries = !state.showLiveDestinationSummaries;
+  state.liveLayoutPending = true;
   document.getElementById("btn-live-destinations").textContent = state.showLiveDestinationSummaries ? "Hide path summaries" : "Show path summaries";
   loadLiveState();
 };
@@ -1347,16 +1352,32 @@ function setupHold(btn, ms, action) {
 
 setupHold(document.getElementById("btn-reset"), 3000, () => api.post("/api/reset"));
 
+function runLiveLayout(animate) {
+  if (!state.live || !cy.nodes().length) return;
+  const root = cy.getElementById(state.live.root.id);
+  const layout = cy.layout({
+    name: "breadthfirst",
+    directed: true,
+    roots: root,
+    circle: false,
+    grid: true,
+    avoidOverlap: true,
+    nodeDimensionsIncludeLabels: true,
+    spacingFactor: 1.35,
+    padding: 70,
+    fit: true,
+    animate: animate,
+    animationDuration: animate ? 650 : 0,
+  });
+  layout.one("layoutstop", () => { state.liveLayoutPending = false; });
+  layout.run();
+}
+
 function runLayout() {
   if (!cy.nodes().length) return;
   if (state.uiMode === "live") {
-    if (!state.live) return;
-    const positions = livePositions(state.live, liveRenderModel(state.live));
-    cy.nodes().forEach((node) => {
-      if (positions[node.id()]) node.position(positions[node.id()]);
-    });
-    cy.zoom(1);
-    cy.center(cy.getElementById(state.live.root.id));
+    state.liveLayoutPending = true;
+    runLiveLayout(true);
     return;
   }
   const layout = cy.layout({
