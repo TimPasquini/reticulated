@@ -373,7 +373,8 @@ function rebuildLive(snapshot) {
     els.push({ group: "nodes", data: { id: item.id, label: item.name, liveKind: "interface", item: item }, classes: classes, position: positions[item.id] });
   }
   for (const item of snapshot.transports || []) {
-    const destinationCount = (snapshot.destinations || []).filter((destination) => destination.via === item.hash).length;
+    const transportCounts = (snapshot.path_summary || {}).by_transport || {};
+    const destinationCount = transportCounts[item.hash] || 0;
     const countLabel = destinationCount ? "\n" + destinationCount.toLocaleString() + " destinations" : "";
     els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash) + countLabel, liveKind: "transport", item: item }, classes: "live-transport", position: positions[item.id] });
   }
@@ -418,16 +419,18 @@ function updateLiveHealth(snapshot) {
   if (failed.length) {
     health.textContent = "Stale/partial · " + failed.map((key) => key + ": " + sources[key].error).join(" · ");
   } else {
+    const destinationCount = (snapshot.path_summary || {}).destination_count ?? (snapshot.destinations || []).length;
     health.textContent = (snapshot.interfaces || []).length + " interfaces · " +
       (snapshot.transports || []).length + " next hops · " +
-      (snapshot.destinations || []).length + " destinations · refreshed " + new Date(snapshot.collected_at * 1000).toLocaleTimeString();
+      destinationCount + " known paths · refreshed " + new Date(snapshot.collected_at * 1000).toLocaleTimeString();
   }
 }
 
 async function loadLiveState() {
   if (state.uiMode !== "live") return;
   try {
-    const snapshot = await api.get("/api/live/state");
+    const pathQuery = state.showLiveDestinationSummaries ? "?include_paths=true" : "";
+    const snapshot = await api.get("/api/live/state" + pathQuery);
     state.live = snapshot;
     updateLiveHealth(snapshot);
     rebuildLive(snapshot);
@@ -1010,7 +1013,7 @@ document.getElementById("mode-live").onclick = () => setOperatingMode("live");
 document.getElementById("btn-live-destinations").onclick = () => {
   state.showLiveDestinationSummaries = !state.showLiveDestinationSummaries;
   document.getElementById("btn-live-destinations").textContent = state.showLiveDestinationSummaries ? "Hide path summaries" : "Show path summaries";
-  if (state.live) rebuildLive(state.live);
+  loadLiveState();
 };
 
 document.getElementById("btn-add-node").onclick = async () => {

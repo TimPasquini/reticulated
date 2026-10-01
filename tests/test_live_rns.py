@@ -115,6 +115,20 @@ class LiveRNSNormalizationTests(unittest.TestCase):
 
 
 class LiveRNSCollectionTests(unittest.TestCase):
+    def test_default_topology_snapshot_omits_destination_fanout(self):
+        provider = LiveRNSProvider(label="Patroon")
+        provider._state = provider.normalize(STATUS, PATHS, label="Patroon")
+
+        topology = provider.topology_snapshot()
+        full = provider.topology_snapshot(include_paths=True)
+
+        self.assertEqual(topology["destinations"], [])
+        self.assertFalse(any(edge["kind"] == "known_path" for edge in topology["edges"]))
+        self.assertEqual(topology["path_summary"]["destination_count"], 2)
+        self.assertEqual(topology["path_summary"]["by_transport"], {"transport-x": 2})
+        self.assertEqual(len(full["destinations"]), 2)
+        self.assertEqual(len([edge for edge in full["edges"] if edge["kind"] == "known_path"]), 2)
+
     def test_last_good_data_survives_temporary_command_failure(self):
         responses = iter(
             [

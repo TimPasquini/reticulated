@@ -165,6 +165,32 @@ class LiveRNSProvider:
             # JSON round-tripping provides a small and safe deep copy for API use.
             return json.loads(json.dumps(self._state))
 
+    def topology_snapshot(self, *, include_paths: bool = False) -> dict[str, Any]:
+        """Return the observed graph, omitting path-table fan-out by default.
+
+        The complete path table remains available on explicit request, but it is
+        not part of the default topology payload. This also prevents older open
+        browser tabs from rebuilding thousands of destination nodes.
+        """
+        state = self.snapshot()
+        destinations = state.get("destinations", [])
+        counts_by_transport: dict[str, int] = {}
+        for destination in destinations:
+            via = destination.get("via")
+            if via:
+                key = str(via)
+                counts_by_transport[key] = counts_by_transport.get(key, 0) + 1
+        state["path_summary"] = {
+            "destination_count": len(destinations),
+            "by_transport": counts_by_transport,
+        }
+        if not include_paths:
+            state["destinations"] = []
+            state["edges"] = [
+                edge for edge in state.get("edges", []) if edge.get("kind") != "known_path"
+            ]
+        return state
+
     @staticmethod
     def normalize(status: dict[str, Any], paths: list[dict[str, Any]], *, label: str) -> dict[str, Any]:
         """Normalize RNS JSON without asserting topology RNS did not report."""

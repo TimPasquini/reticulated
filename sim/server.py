@@ -163,9 +163,9 @@ async def get_status():
 
 
 @app.get("/api/live/state")
-def get_live_state():
+def get_live_state(include_paths: bool = False):
     """Return the latest read-only view of the local shared RNS instance."""
-    return live_rns.snapshot()
+    return live_rns.topology_snapshot(include_paths=include_paths)
 
 
 @app.get("/api/paths/{node_id}")
