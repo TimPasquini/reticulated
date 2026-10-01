@@ -37,6 +37,7 @@ function loraBitrate(sf, bw, cr) {
 const state = {
   uiMode: "simulation",
   live: null,
+  showLiveDestinationSummaries: false,
   liveSlots: {},
   liveNextSlot: {},
   topology: { nodes: {}, links: {} },
@@ -246,6 +247,7 @@ function liveRenderModel(snapshot) {
   const observedEdges = [];
   for (const edge of snapshot.edges || []) {
     if (edge.kind !== "known_path") { observedEdges.push(edge); continue; }
+    if (!state.showLiveDestinationSummaries) continue;
     const destination = destinationById[edge.target];
     if (!destination) continue;
     const hopKey = edge.hops === null || edge.hops === undefined ? "unknown" : String(edge.hops);
@@ -371,7 +373,9 @@ function rebuildLive(snapshot) {
     els.push({ group: "nodes", data: { id: item.id, label: item.name, liveKind: "interface", item: item }, classes: classes, position: positions[item.id] });
   }
   for (const item of snapshot.transports || []) {
-    els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash), liveKind: "transport", item: item }, classes: "live-transport", position: positions[item.id] });
+    const destinationCount = (snapshot.destinations || []).filter((destination) => destination.via === item.hash).length;
+    const countLabel = destinationCount ? "\n" + destinationCount.toLocaleString() + " destinations" : "";
+    els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash) + countLabel, liveKind: "transport", item: item }, classes: "live-transport", position: positions[item.id] });
   }
   for (const entry of renderModel.destinationNodes) {
     const item = entry.item;
@@ -1003,6 +1007,11 @@ document.getElementById("btn-start").onclick = () => api.post("/api/start");
 document.getElementById("btn-stop").onclick = () => api.post("/api/stop");
 document.getElementById("mode-simulation").onclick = () => setOperatingMode("simulation");
 document.getElementById("mode-live").onclick = () => setOperatingMode("live");
+document.getElementById("btn-live-destinations").onclick = () => {
+  state.showLiveDestinationSummaries = !state.showLiveDestinationSummaries;
+  document.getElementById("btn-live-destinations").textContent = state.showLiveDestinationSummaries ? "Hide path summaries" : "Show path summaries";
+  if (state.live) rebuildLive(state.live);
+};
 
 document.getElementById("btn-add-node").onclick = async () => {
   const ext = cy.extent();
