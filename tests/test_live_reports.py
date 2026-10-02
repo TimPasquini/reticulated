@@ -21,6 +21,7 @@ def snapshot(label, transport_id=None, observed=()):
         ],
         "destinations": [],
         "rmap_interfaces": [],
+        "local_services": [],
         "edges": [],
         "health": {},
     }
@@ -157,6 +158,35 @@ class LiveReportRegistryTests(unittest.TestCase):
             network["rmap_matches"][0]["interface_id"],
             "reporter:patroon:interface:nyc",
         )
+
+    def test_service_manifest_names_matching_destination_across_reporters(self):
+        destination_hash = "c" * 32
+        patroon = snapshot("Patroon", transport_id="patroon")
+        patroon["local_services"] = [{
+            "destination_hash": destination_hash,
+            "name": "Patroon rnsh",
+            "type": "rnsh",
+        }]
+        fedora = snapshot("Fedora")
+        fedora["destinations"] = [{
+            "id": f"destination:{destination_hash}", "hash": destination_hash,
+            "hops": 1, "via": None, "local": False,
+            "interface_id": "interface:lan", "interface": "Garage LAN",
+        }]
+        fedora["edges"] = [{
+            "id": "edge:lan:rnsh", "source": "interface:lan",
+            "target": f"destination:{destination_hash}", "kind": "known_path",
+            "hops": 1, "unknown_hops": 0,
+        }]
+
+        registry = LiveReportRegistry()
+        registry.update("patroon", patroon, local=True)
+        registry.update("fedora", fedora)
+        network = registry.network()
+
+        self.assertEqual(len(network["destinations"]), 1)
+        self.assertEqual(network["destinations"][0]["local_service"]["name"], "Patroon rnsh")
+        self.assertEqual(network["destinations"][0]["service_reporters"], ["patroon"])
 
     def test_rejects_invalid_ids_and_payloads(self):
         with self.assertRaises(ValueError):

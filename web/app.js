@@ -193,6 +193,11 @@ const cy = cytoscape({
       "label": "data(label)", "color": "#d7dde5", "text-valign": "bottom", "text-margin-y": 7,
       "font-size": 9, "text-wrap": "wrap", "text-max-width": 90, "text-outline-color": "#11151c", "text-outline-width": 2,
     }},
+    { selector: "node.live-destination.local-service", style: {
+      "shape": "round-rectangle", "width": 112, "height": 44,
+      "background-color": "#62478a", "border-color": "#b58be8", "border-width": 3,
+      "color": "#fff", "font-size": 10, "text-max-width": 106,
+    }},
     { selector: "node.live-destination-group", style: {
       "shape": "round-rectangle", "width": 130, "height": 48, "background-color": "#6d542a",
       "label": "data(label)", "color": "#ffe4ae", "text-valign": "center", "text-halign": "center",
@@ -295,11 +300,18 @@ function liveRenderModel(snapshot) {
   (snapshot.destinations || []).forEach((item) => { destinationById[item.id] = item; });
   const buckets = new Map();
   const observedEdges = [];
+  const destinationNodes = [];
+  const pathEdges = [];
   for (const edge of snapshot.edges || []) {
     if (edge.kind !== "known_path") { observedEdges.push(edge); continue; }
-    if (!state.showLiveDestinationSummaries) continue;
     const destination = destinationById[edge.target];
     if (!destination) continue;
+    if (destination.local || destination.local_service) {
+      destinationNodes.push({ kind: "local_service", item: destination });
+      pathEdges.push(edge);
+      continue;
+    }
+    if (!state.showLiveDestinationSummaries) continue;
     const hopTier = edge.hops === null || edge.hops === undefined ? "unknown" : (edge.hops >= 4 ? "4+" : String(edge.hops));
     const key = edge.source + "|" + destination.interface_id + "|" + hopTier;
     if (!buckets.has(key)) {
@@ -316,8 +328,6 @@ function liveRenderModel(snapshot) {
     buckets.get(key).entries.push({ destination: destination, edge: edge });
   }
 
-  const destinationNodes = [];
-  const pathEdges = [];
   for (const [key, bucket] of buckets) {
     const groupId = "destination-group:" + key;
     const hopCounts = {};
@@ -456,7 +466,7 @@ function livePositions(snapshot, renderModel) {
     const anchor = positions[source] || { x: 0, y: 340 };
     const edgesByTier = new Map();
     edges.forEach((edge) => {
-      const tier = edge.hop_tier === "unknown" ? 5 : (edge.hop_tier === "4+" ? 4 : Number(edge.hop_tier || edge.hops || 5));
+      const tier = edge.hops === 0 ? 1 : (edge.hop_tier === "unknown" ? 5 : (edge.hop_tier === "4+" ? 4 : Number(edge.hop_tier || edge.hops || 5)));
       if (!edgesByTier.has(tier)) edgesByTier.set(tier, []);
       edgesByTier.get(tier).push(edge);
     });
@@ -539,6 +549,10 @@ function rebuildLive(snapshot) {
     const item = entry.item;
     if (entry.kind === "destination_group") {
       els.push({ group: "nodes", data: { id: item.id, label: item.label, liveKind: "destination_group", item: item }, classes: "live-destination-group" + liveHopClass(item.hops, item.hop_tier), position: positions[item.id] });
+    } else if (entry.kind === "local_service") {
+      const service = item.local_service;
+      const label = service ? service.name + "\n" + service.type : "Local service\n" + shortHash(item.hash);
+      els.push({ group: "nodes", data: { id: item.id, label: label, liveKind: "destination", item: item }, classes: "live-destination local-service", position: positions[item.id] });
     } else {
       const hops = item.hops === null || item.hops === undefined ? "? hops" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
       els.push({ group: "nodes", data: { id: item.id, label: shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination", position: positions[item.id] });
@@ -727,9 +741,11 @@ function showLivePanel(el) {
       row("Unknown after next hop", item.unknown_hops) + row("Interface", item.interface) +
       '<details class="section"><summary>Destination hashes' + (item.count > item.sample_hashes.length ? " (first " + item.sample_hashes.length + ")" : "") + '</summary><div class="destination-hashes">' + hashes + "</div></details>";
   } else if (kind === "destination") {
-    title.textContent = "Known destination";
+    const service = item.local_service;
+    title.textContent = service ? service.name : (item.local ? "Local Reticulum service" : "Known destination");
     const remaining = item.hops === null || item.hops === undefined ? "unknown" : Math.max(0, item.hops - (item.via ? 1 : 0));
-    body.innerHTML = row("Destination hash", item.hash) + row("Total hops", item.hops) + row("Next transport", item.via) +
+    body.innerHTML = (service ? row("Service type", service.type) + row("Hosted by", service.reporter_id || item.reporter_label || item.reporter_id) : "") +
+      row("Destination hash", item.hash) + row("Local", item.local === true) + row("Total hops", item.hops) + row("Next transport", item.via) +
       row("Unknown remaining hops", remaining) + row("Interface", item.interface) + row("Expires", item.expires);
   }
 }

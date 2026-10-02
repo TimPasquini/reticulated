@@ -58,6 +58,7 @@ Optional live-mode settings are:
 - `LIVE_RNS_TIMEOUT`: per-command timeout in seconds (default `3`)
 - `LIVE_RNS_INTERVAL`: backend collection interval in seconds (default `5`)
 - `LIVE_RNS_REPORTER_ID`: stable ID for this server's local report
+- `LIVE_RNS_SERVICES_FILE`: optional local service destination manifest
 
 Live paths show only what the local transport reports. Solid edges represent
 the local instance, its interfaces, and reported next-hop transports. Dashed
@@ -66,6 +67,19 @@ application never fabricates intermediate routers. If either command fails,
 the API reports the error and retains the last good data from that source.
 Normalized objects also retain their raw `rnstatus` or `rnpath` fields so newer
 RNS telemetry can be adopted without another collector redesign.
+
+Zero-hop destinations learned through the shared `LocalInterface` are retained
+as local services even when path summaries are hidden. RNS does not identify
+the owning application, so optional service names are matched by exact
+destination hash using a JSON manifest such as `deploy/services.json.example`.
+Set `LIVE_RNS_SERVICES_FILE=/etc/reticulated/services.json` on the server, or
+pass `--services /etc/reticulated/services.json` to a remote reporter. The
+combined graph can then label that hash as, for example, **Patroon rnsh**, even
+when another reporter supplies the selected path observation. Obtain the hash
+from the existing service configuration/startup log or from `rnsh -l -p` with
+the service's exact existing config, service name, and identity options; an
+incorrect rnsh config can create a new identity instead of describing the
+running listener.
 
 RNS 1.5.5 adds live interface attach, detach, and reload operations to
 `rnstatus`. Reticulated deliberately does not invoke or expose those operations;

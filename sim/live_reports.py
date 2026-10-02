@@ -32,6 +32,11 @@ def validate_snapshot(snapshot: Any) -> dict[str, Any]:
             raise ValueError(f"snapshot {key} must be a list of objects")
     if not isinstance(snapshot.get("health", {}), dict):
         raise ValueError("snapshot health must be an object")
+    local_services = snapshot.get("local_services", [])
+    if not isinstance(local_services, list) or not all(
+        isinstance(item, dict) for item in local_services
+    ):
+        raise ValueError("snapshot local_services must be a list of objects")
     return snapshot
 
 
@@ -147,6 +152,8 @@ class LiveReportRegistry:
         interfaces: list[dict[str, Any]] = []
         transports: dict[str, dict[str, Any]] = {}
         rmap_interfaces: list[dict[str, Any]] = []
+        local_services: list[dict[str, Any]] = []
+        services_by_destination: dict[str, list[dict[str, Any]]] = {}
         edges: list[dict[str, Any]] = []
         destination_candidates: dict[str, tuple[tuple[Any, ...], dict[str, Any], dict[str, Any]]] = {}
         reporter_metadata: list[dict[str, Any]] = []
@@ -158,6 +165,12 @@ class LiveReportRegistry:
             metadata = self._metadata(entry)
             reporter_metadata.append(metadata)
             root = snapshot["root"]
+            for service in snapshot.get("local_services", []):
+                destination_hash = str(service.get("destination_hash") or "").lower()
+                merged_service = {**service, "reporter_id": reporter_id}
+                local_services.append(merged_service)
+                if destination_hash:
+                    services_by_destination.setdefault(destination_hash, []).append(merged_service)
             root_transport = root.get("transport_id")
             root_id = f"transport:{root_transport}" if root_transport else f"reporter:{reporter_id}"
             reporter_root = {
@@ -281,6 +294,12 @@ class LiveReportRegistry:
 
         destinations = []
         for _, destination, edge in destination_candidates.values():
+            service_matches = services_by_destination.get(str(destination.get("hash") or "").lower(), [])
+            if service_matches:
+                destination["local_service"] = service_matches[0]
+                destination["service_reporters"] = sorted({
+                    match["reporter_id"] for match in service_matches
+                })
             destinations.append(destination)
             edges.append(edge)
 
@@ -304,6 +323,7 @@ class LiveReportRegistry:
             "transports": merged_transports,
             "destinations": destinations,
             "rmap_interfaces": rmap_interfaces,
+            "local_services": local_services,
             "edges": edges,
             "health": reporter_health,
             "correlations": self.correlations(),

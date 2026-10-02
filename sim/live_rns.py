@@ -15,6 +15,34 @@ from . import config
 
 
 CommandRunner = Callable[[list[str], float], Any]
+DESTINATION_HASH_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def load_local_services(path: str | None) -> list[dict[str, Any]]:
+    """Load operator-supplied service identity without inspecting processes."""
+    if not path:
+        return []
+    with open(path, encoding="utf-8") as source:
+        raw_services = json.load(source)
+    if not isinstance(raw_services, list):
+        raise ValueError("service manifest must contain a JSON array")
+    services = []
+    for index, raw in enumerate(raw_services):
+        if not isinstance(raw, dict):
+            raise ValueError(f"service manifest entry {index} must be an object")
+        destination_hash = str(raw.get("destination_hash") or "").lower()
+        if not DESTINATION_HASH_PATTERN.fullmatch(destination_hash):
+            raise ValueError(f"service manifest entry {index} has an invalid destination_hash")
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"service manifest entry {index} requires a name")
+        services.append({
+            "destination_hash": destination_hash,
+            "name": name,
+            "type": str(raw.get("type") or "Reticulum service"),
+            "raw": raw,
+        })
+    return services
 
 
 def _canonical_endpoint(value: Any) -> str:
@@ -113,6 +141,16 @@ def topology_snapshot(
         "destination_count": len(destinations),
         "by_transport": counts_by_transport,
     }
+    local_destinations = [item for item in destinations if item.get("local")]
+    service_destinations = [
+        item for item in destinations if item.get("local") or item.get("local_service")
+    ]
+    state["service_summary"] = {
+        "local_destination_count": len(local_destinations),
+        "identified_count": len([
+            item for item in service_destinations if item.get("local_service")
+        ]),
+    }
     rmap_interfaces = state.get("rmap_interfaces", [])
     state["rmap_summary"] = {
         "record_count": len(rmap_interfaces),
@@ -127,9 +165,13 @@ def topology_snapshot(
         {match["interface_id"] for match in state["rmap_matches"]}
     )
     if not include_paths:
-        state["destinations"] = []
+        local_destination_ids = {
+            item["id"] for item in service_destinations if item.get("id")
+        }
+        state["destinations"] = service_destinations
         state["edges"] = [
-            edge for edge in state.get("edges", []) if edge.get("kind") != "known_path"
+            edge for edge in state.get("edges", [])
+            if edge.get("kind") != "known_path" or edge.get("target") in local_destination_ids
         ]
     if not include_rmap:
         state["rmap_interfaces"] = []
@@ -183,6 +225,7 @@ class LiveRNSProvider:
         rnstatus_path: str | None = None,
         rnpath_path: str | None = None,
         config_dir: str | None = None,
+        services_file: str | None = None,
     ) -> None:
         self.label = label or config.LIVE_RNS_LABEL
         self.timeout = timeout if timeout is not None else config.LIVE_RNS_TIMEOUT
@@ -190,6 +233,9 @@ class LiveRNSProvider:
         self.rnstatus_path = rnstatus_path or config.RNSTATUS_PATH
         self.rnpath_path = rnpath_path or config.RNPATH_PATH
         self.config_dir = config_dir if config_dir is not None else config.LIVE_RNS_CONFIG_DIR
+        self.services_file = (
+            services_file if services_file is not None else config.LIVE_RNS_SERVICES_FILE
+        )
         self._lock = threading.Lock()
         self._last_status: dict[str, Any] | None = None
         self._last_paths: list[dict[str, Any]] | None = None
@@ -206,11 +252,13 @@ class LiveRNSProvider:
             "transports": [],
             "destinations": [],
             "rmap_interfaces": [],
+            "local_services": [],
             "edges": [],
             "health": {
                 "rnstatus": {"ok": False, "error": "not collected yet"},
                 "rnpath": {"ok": False, "error": "not collected yet"},
                 "rmap": {"ok": False, "error": "not collected yet"},
+                "services": {"ok": True, "error": None},
             },
         }
 
@@ -290,11 +338,19 @@ class LiveRNSProvider:
             else:
                 self._last_discovered = discovered
 
+        try:
+            local_services = load_local_services(self.services_file)
+            service_health = {"ok": True, "error": None}
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            local_services = []
+            service_health = {"ok": False, "error": str(exc)}
+
         normalized = self.normalize(
             self._last_status or {"interfaces": []},
             self._last_paths or [],
             label=self.label,
             discovered=self._last_discovered or [],
+            local_services=local_services,
         )
         normalized["collected_at"] = time.time()
         normalized["stale"] = not (status_health["ok"] and path_health["ok"])
@@ -302,6 +358,7 @@ class LiveRNSProvider:
             "rnstatus": status_health,
             "rnpath": path_health,
             "rmap": rmap_health,
+            "services": service_health,
         }
         with self._lock:
             self._state = normalized
@@ -332,6 +389,7 @@ class LiveRNSProvider:
         *,
         label: str,
         discovered: list[dict[str, Any]] | None = None,
+        local_services: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Normalize RNS JSON without asserting topology RNS did not report."""
         transport_id = status.get("transport_id")
@@ -383,6 +441,12 @@ class LiveRNSProvider:
                 "certainty": "observed",
             })
 
+        services = local_services or []
+        service_by_hash = {
+            str(service.get("destination_hash") or "").lower(): service
+            for service in services
+            if service.get("destination_hash")
+        }
         transports: dict[str, dict[str, Any]] = {}
         destinations: dict[str, dict[str, Any]] = {}
         for raw in paths:
@@ -421,6 +485,7 @@ class LiveRNSProvider:
 
             destination_id = f"destination:{destination_hash}"
             hops = _as_int(raw.get("hops"))
+            is_local = hops == 0
             reported_via = raw.get("via")
             # When an announce has no transport header, RNS stores the
             # destination hash itself as `via`. It is directly heard, not a
@@ -436,6 +501,8 @@ class LiveRNSProvider:
                 "interface": interface_name,
                 "timestamp": raw.get("timestamp"),
                 "expires": raw.get("expires"),
+                "local": is_local,
+                "local_service": service_by_hash.get(str(destination_hash).lower()),
                 "raw": raw,
             }
             destinations[destination_id] = destination
@@ -509,6 +576,7 @@ class LiveRNSProvider:
             "transports": list(transports.values()),
             "destinations": list(destinations.values()),
             "rmap_interfaces": rmap_interfaces,
+            "local_services": services,
             "edges": edges,
             "health": {},
         }

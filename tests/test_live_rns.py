@@ -1,11 +1,12 @@
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from sim import config
-from sim.live_rns import LiveRNSProvider, topology_snapshot
+from sim.live_rns import LiveRNSProvider, load_local_services, topology_snapshot
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -77,6 +78,20 @@ DISCOVERED = [{
 
 
 class LiveRNSNormalizationTests(unittest.TestCase):
+    def test_loads_validated_local_service_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "services.json"
+            manifest.write_text(json.dumps([{
+                "destination_hash": "A" * 32,
+                "name": "Patroon rnsh",
+                "type": "rnsh",
+            }]))
+
+            services = load_local_services(str(manifest))
+
+        self.assertEqual(services[0]["destination_hash"], "a" * 32)
+        self.assertEqual(services[0]["name"], "Patroon rnsh")
+
     def test_normalizes_sanitized_patroon_1_5_5_capture(self):
         status = json.loads((FIXTURES / "rnstatus_1_5_5_patroon.json").read_text())
         paths = json.loads((FIXTURES / "rnpath_1_5_5_patroon.json").read_text())
@@ -251,21 +266,37 @@ class LiveRNSCollectionTests(unittest.TestCase):
         self.assertIn("skipped", stale["health"]["rnpath"]["error"])
 
     def test_zero_hop_local_path_does_not_create_a_transport(self):
+        destination_hash = "c" * 32
         local_path = [{
-            "hash": "local-destination",
+            "hash": destination_hash,
             "timestamp": 1234,
-            "via": "local-destination",
+            "via": destination_hash,
             "hops": 0,
             "expires": 2345,
             "interface": "LocalInterface[rns/patroon]",
         }]
-        state = LiveRNSProvider.normalize({"interfaces": []}, local_path, label="Patroon")
+        service = {
+            "destination_hash": destination_hash,
+            "name": "Patroon rnsh",
+            "type": "rnsh",
+        }
+        state = LiveRNSProvider.normalize(
+            {"interfaces": []}, local_path, label="Patroon", local_services=[service]
+        )
 
         self.assertEqual(state["transports"], [])
         self.assertIsNone(state["destinations"][0]["via"])
+        self.assertTrue(state["destinations"][0]["local"])
+        self.assertEqual(state["destinations"][0]["local_service"]["name"], "Patroon rnsh")
         path_edge = next(edge for edge in state["edges"] if edge["kind"] == "known_path")
         self.assertEqual(path_edge["source"], state["interfaces"][0]["id"])
         self.assertEqual(path_edge["unknown_hops"], 0)
+        compact = topology_snapshot(state)
+        self.assertEqual(len(compact["destinations"]), 1)
+        self.assertEqual(compact["service_summary"], {
+            "local_destination_count": 1,
+            "identified_count": 1,
+        })
 
     def test_direct_one_hop_destination_does_not_create_a_transport(self):
         direct_path = [{
