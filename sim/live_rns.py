@@ -12,37 +12,10 @@ from collections.abc import Callable
 from typing import Any
 
 from . import config
+from .live_services import discover_local_services
 
 
 CommandRunner = Callable[[list[str], float], Any]
-DESTINATION_HASH_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
-
-
-def load_local_services(path: str | None) -> list[dict[str, Any]]:
-    """Load operator-supplied service identity without inspecting processes."""
-    if not path:
-        return []
-    with open(path, encoding="utf-8") as source:
-        raw_services = json.load(source)
-    if not isinstance(raw_services, list):
-        raise ValueError("service manifest must contain a JSON array")
-    services = []
-    for index, raw in enumerate(raw_services):
-        if not isinstance(raw, dict):
-            raise ValueError(f"service manifest entry {index} must be an object")
-        destination_hash = str(raw.get("destination_hash") or "").lower()
-        if not DESTINATION_HASH_PATTERN.fullmatch(destination_hash):
-            raise ValueError(f"service manifest entry {index} has an invalid destination_hash")
-        name = str(raw.get("name") or "").strip()
-        if not name:
-            raise ValueError(f"service manifest entry {index} requires a name")
-        services.append({
-            "destination_hash": destination_hash,
-            "name": name,
-            "type": str(raw.get("type") or "Reticulum service"),
-            "raw": raw,
-        })
-    return services
 
 
 def _canonical_endpoint(value: Any) -> str:
@@ -225,7 +198,6 @@ class LiveRNSProvider:
         rnstatus_path: str | None = None,
         rnpath_path: str | None = None,
         config_dir: str | None = None,
-        services_file: str | None = None,
     ) -> None:
         self.label = label or config.LIVE_RNS_LABEL
         self.timeout = timeout if timeout is not None else config.LIVE_RNS_TIMEOUT
@@ -233,9 +205,6 @@ class LiveRNSProvider:
         self.rnstatus_path = rnstatus_path or config.RNSTATUS_PATH
         self.rnpath_path = rnpath_path or config.RNPATH_PATH
         self.config_dir = config_dir if config_dir is not None else config.LIVE_RNS_CONFIG_DIR
-        self.services_file = (
-            services_file if services_file is not None else config.LIVE_RNS_SERVICES_FILE
-        )
         self._lock = threading.Lock()
         self._last_status: dict[str, Any] | None = None
         self._last_paths: list[dict[str, Any]] | None = None
@@ -339,11 +308,15 @@ class LiveRNSProvider:
                 self._last_discovered = discovered
 
         try:
-            local_services = load_local_services(self.services_file)
-            service_health = {"ok": True, "error": None}
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            local_services = []
-            service_health = {"ok": False, "error": str(exc)}
+            local_services, service_errors = discover_local_services(self._last_status or {})
+        except Exception as exc:
+            # Service enrichment must never interrupt the core rnstatus/rnpath
+            # observation loop.
+            local_services, service_errors = [], [str(exc)]
+        service_health = {
+            "ok": not service_errors,
+            "error": "; ".join(service_errors) if service_errors else None,
+        }
 
         normalized = self.normalize(
             self._last_status or {"interfaces": []},

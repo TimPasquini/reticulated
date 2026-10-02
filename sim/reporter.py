@@ -57,11 +57,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", dest="config_dir", help="alternate Reticulum config directory")
     parser.add_argument("--rnstatus", default="rnstatus", help="rnstatus executable")
     parser.add_argument("--rnpath", default="rnpath", help="rnpath executable")
-    parser.add_argument(
-        "--services",
-        dest="services_file",
-        help="JSON manifest mapping locally hosted service names to destination hashes",
-    )
     parser.add_argument("--once", action="store_true", help="send one report and exit")
     return parser
 
@@ -86,7 +81,6 @@ def main() -> None:
         rnstatus_path=args.rnstatus,
         rnpath_path=args.rnpath,
         config_dir=args.config_dir,
-        services_file=args.services_file,
     )
     while True:
         snapshot = provider.collect()

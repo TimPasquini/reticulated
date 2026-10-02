@@ -159,7 +159,7 @@ class LiveReportRegistryTests(unittest.TestCase):
             "reporter:patroon:interface:nyc",
         )
 
-    def test_service_manifest_names_matching_destination_across_reporters(self):
+    def test_discovered_service_names_matching_destination_across_reporters(self):
         destination_hash = "c" * 32
         patroon = snapshot("Patroon", transport_id="patroon")
         patroon["local_services"] = [{

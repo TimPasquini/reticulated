@@ -1,12 +1,11 @@
 import json
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from sim import config
-from sim.live_rns import LiveRNSProvider, load_local_services, topology_snapshot
+from sim.live_rns import LiveRNSProvider, topology_snapshot
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -78,20 +77,6 @@ DISCOVERED = [{
 
 
 class LiveRNSNormalizationTests(unittest.TestCase):
-    def test_loads_validated_local_service_manifest(self):
-        with tempfile.TemporaryDirectory() as directory:
-            manifest = Path(directory) / "services.json"
-            manifest.write_text(json.dumps([{
-                "destination_hash": "A" * 32,
-                "name": "Patroon rnsh",
-                "type": "rnsh",
-            }]))
-
-            services = load_local_services(str(manifest))
-
-        self.assertEqual(services[0]["destination_hash"], "a" * 32)
-        self.assertEqual(services[0]["name"], "Patroon rnsh")
-
     def test_normalizes_sanitized_patroon_1_5_5_capture(self):
         status = json.loads((FIXTURES / "rnstatus_1_5_5_patroon.json").read_text())
         paths = json.loads((FIXTURES / "rnpath_1_5_5_patroon.json").read_text())

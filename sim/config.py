@@ -26,7 +26,6 @@ LIVE_RNS_LABEL = os.environ.get("LIVE_RNS_LABEL", socket.gethostname() or "Local
 LIVE_RNS_TIMEOUT = float(os.environ.get("LIVE_RNS_TIMEOUT", "3"))
 LIVE_RNS_INTERVAL = float(os.environ.get("LIVE_RNS_INTERVAL", "5"))
 LIVE_RNS_REPORTER_ID = os.environ.get("LIVE_RNS_REPORTER_ID", socket.gethostname() or "local")
-LIVE_RNS_SERVICES_FILE = os.environ.get("LIVE_RNS_SERVICES_FILE")
 LIVE_REPORT_TOKEN = os.environ.get("RETICULATED_REPORT_TOKEN")
 LIVE_REPORT_STALE_AFTER = float(os.environ.get("LIVE_REPORT_STALE_AFTER", "90"))
 LIVE_REPORT_MAX_BYTES = int(os.environ.get("LIVE_REPORT_MAX_BYTES", str(16 * 1024 * 1024)))
