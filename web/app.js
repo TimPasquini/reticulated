@@ -127,6 +127,7 @@ const cy = cytoscape({
   container: document.getElementById("cy"),
   wheelSensitivity: 0.2,
   style: [
+    { selector: "node", style: { "text-overflow-wrap": "anywhere" }},
     { selector: "node.host", style: {
       "shape": "ellipse", "width": 46, "height": 46,
       "background-color": "data(hostcolor)", "label": "data(label)",
@@ -197,6 +198,7 @@ const cy = cytoscape({
       "shape": "round-rectangle", "width": 112, "height": 44,
       "background-color": "#62478a", "border-color": "#b58be8", "border-width": 3,
       "color": "#fff", "font-size": 10, "text-max-width": 106,
+      "text-valign": "center", "text-halign": "center", "text-margin-y": 0,
     }},
     { selector: "node.live-destination-group", style: {
       "shape": "round-rectangle", "width": 130, "height": 48, "background-color": "#6d542a",
@@ -514,7 +516,8 @@ function rebuildLive(snapshot) {
     if (item.path_only) classes += " path-only";
     if (rmapMatches.length) classes += " rmap-matched";
     const rmapLabel = rmapMatches.length ? "\nRMAP: " + (rmapMatches[0].name || "matched") : "";
-    els.push({ group: "nodes", data: { id: item.id, label: item.name + rmapLabel, liveKind: "interface", item: { ...item, rmap_matches: rmapMatches } }, classes: classes, position: positions[item.id] });
+    const interfaceLabel = item.short_name || item.name;
+    els.push({ group: "nodes", data: { id: item.id, label: interfaceLabel + rmapLabel, liveKind: "interface", item: { ...item, rmap_matches: rmapMatches } }, classes: classes, position: positions[item.id] });
   }
   for (const item of snapshot.transports || []) {
     if (rootIds.has(item.id)) continue;
