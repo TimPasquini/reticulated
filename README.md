@@ -101,6 +101,15 @@ The reporter gzip-compresses normalized `rnstatus -j`, `rnpath -t -j`, and
 mutating RNS commands. Reports are kept in memory and replaced atomically;
 after a server restart, each node repopulates its entry on its next interval.
 
+`rnstatus -d -j` supplies RMAP discovery records received by that reporter; it
+is not a list of the reporter's own interfaces. In the combined view,
+Reticulated correlates those records with every reporting node's interfaces:
+Backbone and I2P endpoints are matched by advertised address/port, while a
+node's own published RNode or I2P interface is matched by transport identity
+and interface type. Thus an RMAP cache contributed by Fedora can annotate
+Patroon's interfaces even when Patroon has received no discovery records of
+its own. The UI reports **RMAP records** and **interface matches** separately.
+
 The default **All reporters** view draws one evidence graph. The server's local
 report is primary, transport identities shared between reports become the same
 graph node, and reporter-specific interfaces remain distinct. A reporter whose

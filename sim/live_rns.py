@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import threading
 import time
@@ -14,6 +15,86 @@ from . import config
 
 
 CommandRunner = Callable[[list[str], float], Any]
+
+
+def _canonical_endpoint(value: Any) -> str:
+    endpoint = str(value or "").lower().rstrip(".")
+    # RNS 1.5.5's I2P status value includes the conventional suffix while
+    # interface-discovery records currently expose the same b32 without it.
+    if endpoint.endswith(".b32.i2p"):
+        endpoint = endpoint[:-8]
+    return endpoint
+
+
+def _endpoint_from_interface(raw: dict[str, Any]) -> tuple[str | None, int | None]:
+    host = raw.get("target_host") or raw.get("remote")
+    port = _as_int(raw.get("target_port") or raw.get("port"))
+    if host:
+        return _canonical_endpoint(host), port
+    # RNS 1.5.5 includes a Backbone client's active target in its display name,
+    # but not as separate JSON fields.
+    name = str(raw.get("name") or "")
+    match = re.search(r"/([^/\]]+):(\d+)\]$", name)
+    if match:
+        return _canonical_endpoint(match.group(1)), int(match.group(2))
+    return None, None
+
+
+def _rmap_matches(state: dict[str, Any]) -> list[dict[str, Any]]:
+    records = state.get("rmap_interfaces", [])
+    roots = state.get("reporter_roots") or [state.get("root", {})]
+    root_transport_by_reporter = {
+        root.get("reporter_id"): str(root.get("transport_id"))
+        for root in roots if root.get("transport_id")
+    }
+    default_transport = str(state.get("root", {}).get("transport_id") or "")
+    matches: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for interface in state.get("interfaces", []):
+        raw = interface.get("raw", {})
+        remote_host = _canonical_endpoint(interface.get("remote_host"))
+        remote_port = _as_int(interface.get("remote_port"))
+        i2p_b32 = _canonical_endpoint(interface.get("i2p_b32") or raw.get("i2p_b32"))
+        reporter_transport = root_transport_by_reporter.get(
+            interface.get("reporter_id"), default_transport
+        )
+        interface_type = interface.get("type")
+        for record in records:
+            reachable = _canonical_endpoint(record.get("reachable_on"))
+            record_port = _as_int(record.get("port"))
+            match_kind = None
+            if remote_host and reachable == remote_host and (
+                remote_port is None or record_port is None or remote_port == record_port
+            ):
+                match_kind = "remote_endpoint"
+            elif i2p_b32 and reachable == i2p_b32:
+                match_kind = "i2p_endpoint"
+            elif (
+                reporter_transport
+                and str(record.get("transport_id")) == reporter_transport
+                and record.get("type") == interface_type
+            ):
+                match_kind = "local_publication"
+            if not match_kind:
+                continue
+            key = (interface["id"], record["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append({
+                "interface_id": interface["id"],
+                "rmap_interface_id": record["id"],
+                "transport_id": record.get("transport_id"),
+                "kind": match_kind,
+                "name": record.get("name"),
+                "type": record.get("type"),
+                "reachable_on": record.get("reachable_on"),
+                "port": record.get("port"),
+                "latitude": record.get("latitude"),
+                "longitude": record.get("longitude"),
+                "record": record,
+            })
+    return matches
 
 
 def topology_snapshot(
@@ -34,11 +115,17 @@ def topology_snapshot(
     }
     rmap_interfaces = state.get("rmap_interfaces", [])
     state["rmap_summary"] = {
+        "record_count": len(rmap_interfaces),
+        # Kept for API compatibility with the initial live implementation.
         "interface_count": len(rmap_interfaces),
         "transport_count": len(
             {item.get("transport_id") for item in rmap_interfaces if item.get("transport_id")}
         ),
     }
+    state["rmap_matches"] = _rmap_matches(state)
+    state["rmap_summary"]["matched_interface_count"] = len(
+        {match["interface_id"] for match in state["rmap_matches"]}
+    )
     if not include_paths:
         state["destinations"] = []
         state["edges"] = [
@@ -46,6 +133,7 @@ def topology_snapshot(
         ]
     if not include_rmap:
         state["rmap_interfaces"] = []
+        state["rmap_matches"] = []
     return state
 
 
@@ -265,6 +353,7 @@ class LiveRNSProvider:
             name = str(raw.get("name") or raw.get("short_name") or "Unnamed interface")
             interface_hash = raw.get("hash")
             fragment = str(interface_hash) if interface_hash else _stable_fragment(name)
+            remote_host, remote_port = _endpoint_from_interface(raw)
             item = {
                 "id": f"interface:{fragment}",
                 "name": name,
@@ -278,6 +367,9 @@ class LiveRNSProvider:
                 "peers": raw.get("peers"),
                 "rxb": raw.get("rxb"),
                 "txb": raw.get("txb"),
+                "remote_host": remote_host,
+                "remote_port": remote_port,
+                "i2p_b32": raw.get("i2p_b32"),
                 "path_only": False,
                 "raw": raw,
             }

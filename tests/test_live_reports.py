@@ -131,6 +131,33 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(network["destinations"][0]["reporter_id"], "vehicle")
         self.assertEqual(network["destinations"][0]["hops"], 2)
 
+    def test_contributed_rmap_records_match_primary_interface_endpoints(self):
+        patroon = snapshot("Patroon", transport_id="patroon")
+        patroon["interfaces"] = [{
+            "id": "interface:nyc", "name": "NYC Backbone",
+            "type": "BackboneClientInterface", "remote_host": "nyc.example.net",
+            "remote_port": 4242, "raw": {},
+        }]
+        observer = snapshot("Observer")
+        observer["rmap_interfaces"] = [{
+            "id": "rmap-interface:nyc", "discovery_hash": "nyc",
+            "transport_id": "nyc-transport", "name": "NYC RMAP node",
+            "type": "BackboneInterface", "reachable_on": "nyc.example.net",
+            "port": 4242,
+        }]
+
+        registry = LiveReportRegistry()
+        registry.update("patroon", patroon, local=True)
+        registry.update("observer", observer)
+        network = registry.network(include_rmap=True)
+
+        self.assertEqual(network["rmap_summary"]["matched_interface_count"], 1)
+        self.assertEqual(network["rmap_matches"][0]["kind"], "remote_endpoint")
+        self.assertEqual(
+            network["rmap_matches"][0]["interface_id"],
+            "reporter:patroon:interface:nyc",
+        )
+
     def test_rejects_invalid_ids_and_payloads(self):
         with self.assertRaises(ValueError):
             validate_reporter_id("../bad")

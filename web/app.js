@@ -166,6 +166,7 @@ const cy = cytoscape({
     { selector: "node.live-interface.i2p", style: { "background-color": "#66437a", "border-color": "#a46fc0" }},
     { selector: "node.live-interface.backbone", style: { "background-color": "#285b78", "border-color": "#4fa3cf" }},
     { selector: "node.live-interface.path-only", style: { "border-style": "dashed", "opacity": 0.75 }},
+    { selector: "node.live-interface.rmap-matched", style: { "border-width": 3, "border-color": "#56b9bd" }},
     { selector: "node.live-transport", style: {
       "shape": "hexagon", "width": 50, "height": 50, "background-color": "#3d7c59",
       "label": "data(label)", "color": "#eaffef", "text-valign": "center", "text-halign": "center",
@@ -361,6 +362,7 @@ function liveRenderModel(snapshot) {
     if (root.transport_id) observedTransportIds.add(String(root.transport_id));
   });
   const rmapMatches = {};
+  const rmapInterfaceMatches = {};
   let unmatchedRmapCount = 0;
   for (const item of rmapItems) {
     const transportHash = String(item.transport_id || "");
@@ -372,10 +374,15 @@ function liveRenderModel(snapshot) {
     if (!rmapMatches[id]) rmapMatches[id] = [];
     rmapMatches[id].push(item);
   }
+  for (const match of snapshot.rmap_matches || []) {
+    if (!rmapInterfaceMatches[match.interface_id]) rmapInterfaceMatches[match.interface_id] = [];
+    rmapInterfaceMatches[match.interface_id].push(match);
+  }
   return {
     destinationNodes: destinationNodes,
     edges: observedEdges.concat(pathEdges),
     rmapMatches: rmapMatches,
+    rmapInterfaceMatches: rmapInterfaceMatches,
     unmatchedRmapCount: unmatchedRmapCount,
   };
 }
@@ -492,9 +499,12 @@ function rebuildLive(snapshot) {
     els.push({ group: "nodes", data: { id: root.id, label: label, liveKind: "root", item: { ...root, rmap_records: rmapRecords } }, classes: classes, position: positions[root.id] });
   }
   for (const item of snapshot.interfaces || []) {
+    const rmapMatches = renderModel.rmapInterfaceMatches[item.id] || [];
     let classes = "live-interface" + liveInterfaceClass(item);
     if (item.path_only) classes += " path-only";
-    els.push({ group: "nodes", data: { id: item.id, label: item.name, liveKind: "interface", item: item }, classes: classes, position: positions[item.id] });
+    if (rmapMatches.length) classes += " rmap-matched";
+    const rmapLabel = rmapMatches.length ? "\nRMAP: " + (rmapMatches[0].name || "matched") : "";
+    els.push({ group: "nodes", data: { id: item.id, label: item.name + rmapLabel, liveKind: "interface", item: { ...item, rmap_matches: rmapMatches } }, classes: classes, position: positions[item.id] });
   }
   for (const item of snapshot.transports || []) {
     if (rootIds.has(item.id)) continue;
@@ -505,6 +515,25 @@ function rebuildLive(snapshot) {
     const rmapLabel = rmapRecords.length ? "\nRMAP: " + (rmapRecords[0].name || rmapRecords[0].type || "matched") : "";
     const transportItem = { ...item, rmap_records: rmapRecords };
     els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash) + rmapLabel + countLabel, liveKind: "transport", item: transportItem }, classes: "live-transport" + (rmapRecords.length ? " rmap-matched" : ""), position: positions[item.id] });
+  }
+  const existingNodeIds = new Set(els.filter((element) => element.group === "nodes").map((element) => element.data.id));
+  const existingObservedPairs = new Set(renderModel.edges.map((edge) => edge.source + "|" + edge.target));
+  for (const match of snapshot.rmap_matches || []) {
+    if (match.kind === "local_publication" || !match.transport_id) continue;
+    const transportId = "transport:" + match.transport_id;
+    if (transportId === match.interface_id || rootIds.has(transportId)) continue;
+    if (!existingNodeIds.has(transportId)) {
+      const interfacePosition = positions[match.interface_id] || { x: 0, y: 170 };
+      positions[transportId] = positions[transportId] || { x: interfacePosition.x, y: interfacePosition.y + 160 };
+      const transportItem = { id: transportId, hash: match.transport_id, rmap: true, rmap_records: [match.record] };
+      els.push({ group: "nodes", data: { id: transportId, label: "RMAP node\n" + (match.name || shortHash(match.transport_id)), liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport", position: positions[transportId] });
+      existingNodeIds.add(transportId);
+    }
+    const pair = match.interface_id + "|" + transportId;
+    if (!existingObservedPairs.has(pair)) {
+      els.push({ group: "edges", data: { id: "edge:rmap-match:" + match.interface_id + ":" + match.rmap_interface_id, source: match.interface_id, target: transportId, label: "RMAP endpoint match", liveKind: "edge", item: { kind: "rmap_endpoint_match", certainty: "advertised", match: match } }, classes: "live-discovered" });
+      existingObservedPairs.add(pair);
+    }
   }
   for (const entry of renderModel.destinationNodes) {
     const item = entry.item;
@@ -553,10 +582,11 @@ function updateLiveHealth(snapshot) {
     health.textContent = "Reporter stale · last received " + Math.round(reporter.age_seconds || 0) + "s ago";
   } else {
     const destinationCount = (snapshot.path_summary || {}).destination_count ?? (snapshot.destinations || []).length;
-    const rmapCount = (snapshot.rmap_summary || {}).interface_count || 0;
+    const rmapCount = (snapshot.rmap_summary || {}).record_count || 0;
+    const rmapMatched = (snapshot.rmap_summary || {}).matched_interface_count || 0;
     health.textContent = (snapshot.interfaces || []).length + " interfaces · " +
       (snapshot.transports || []).length + " next hops · " +
-      destinationCount + " known paths · " + rmapCount + " RMAP interfaces · received " + Math.round(reporter.age_seconds || 0) + "s ago";
+      destinationCount + " known paths · " + rmapCount + " RMAP records · " + rmapMatched + " interface matches · received " + Math.round(reporter.age_seconds || 0) + "s ago";
   }
 }
 
@@ -643,10 +673,15 @@ function showLivePanel(el) {
       row("Mode", "read-only live observation") + rmapDetails;
   } else if (kind === "interface") {
     title.textContent = item.name || "Interface";
+    const rmapMatches = item.rmap_matches || [];
+    const rmapDetails = rmapMatches.length ? '<details class="section" open><summary>RMAP matches (' + rmapMatches.length + ')</summary>' +
+      rmapMatches.map((match) => row("Match", match.kind) + row("RMAP name", match.name) +
+        row("Transport", match.transport_id) + row("Reachable on", match.reachable_on) +
+        row("Coordinates", match.latitude === null || match.latitude === undefined ? "unknown" : match.latitude + ", " + match.longitude)).join("") + "</details>" : "";
     body.innerHTML = row("Reporter", item.reporter_id) + row("Type", item.type) + row("Interface hash", item.interface_hash) + row("Mode", item.mode) +
       row("Online", item.status) + row("Peers", item.peers) + row("Bitrate", item.bitrate) + row("MTU", item.mtu) +
       row("Received bytes", item.rxb) + row("Transmitted bytes", item.txb) +
-      (item.path_only ? '<div class="muted">This interface was reported by the path table but absent from the latest interface status.</div>' : "");
+      (item.path_only ? '<div class="muted">This interface was reported by the path table but absent from the latest interface status.</div>' : "") + rmapDetails;
   } else if (kind === "transport") {
     const destinations = (state.live.destinations || []).filter((destination) => destination.via === item.hash);
     const knownDestinationCount = ((state.live.path_summary || {}).by_transport || {})[item.hash] || destinations.length;

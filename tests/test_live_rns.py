@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from sim import config
-from sim.live_rns import LiveRNSProvider
+from sim.live_rns import LiveRNSProvider, topology_snapshot
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -93,6 +93,9 @@ class LiveRNSNormalizationTests(unittest.TestCase):
         self.assertEqual(modes["RNodeInterface"], "access_point")
         rnode = next(item for item in state["interfaces"] if item["type"] == "RNodeInterface")
         self.assertEqual(rnode["raw"]["noise_floor"], -119)
+        backbone = next(item for item in state["interfaces"] if item["type"] == "BackboneClientInterface")
+        self.assertEqual(backbone["remote_host"], "lga.us.thunderhost.net")
+        self.assertEqual(backbone["remote_port"], 4242)
         local = next(item for item in state["destinations"] if item["hops"] == 0)
         self.assertIsNone(local["via"])
 
@@ -138,6 +141,66 @@ class LiveRNSNormalizationTests(unittest.TestCase):
         self.assertEqual(item["transport_id"], "rmap-transport-a")
         self.assertEqual(item["latitude"], 40.0)
         self.assertFalse(any(edge.get("target") == item["id"] for edge in state["edges"]))
+
+    def test_matches_local_interfaces_to_rmap_endpoints_and_publications(self):
+        status = {
+            "transport_id": "patroon-transport",
+            "interfaces": [
+                {
+                    "name": "BackboneInterface[NYC/lga.example.net:4242]",
+                    "short_name": "NYC",
+                    "hash": "backbone-hash",
+                    "type": "BackboneClientInterface",
+                },
+                {
+                    "name": "RNodeInterface[Patroon]",
+                    "short_name": "Patroon",
+                    "hash": "radio-hash",
+                    "type": "RNodeInterface",
+                },
+                {
+                    "name": "I2PInterface[Patroon I2P]",
+                    "short_name": "Patroon I2P",
+                    "hash": "i2p-hash",
+                    "type": "I2PInterface",
+                    "i2p_b32": "patroon-address.b32.i2p",
+                },
+            ],
+        }
+        discovered = [
+            {
+                "discovery_hash": "nyc-record",
+                "transport_id": "nyc-transport",
+                "name": "NYC gateway",
+                "type": "BackboneInterface",
+                "reachable_on": "lga.example.net",
+                "port": 4242,
+            },
+            {
+                "discovery_hash": "radio-record",
+                "transport_id": "patroon-transport",
+                "name": "Patroon LoRa",
+                "type": "RNodeInterface",
+            },
+            {
+                "discovery_hash": "i2p-record",
+                "transport_id": "patroon-transport",
+                "name": "Patroon I2P",
+                "type": "I2PInterface",
+                "reachable_on": "patroon-address",
+            },
+        ]
+        normalized = LiveRNSProvider.normalize(
+            status, [], label="Patroon", discovered=discovered
+        )
+        projected = topology_snapshot(normalized, include_rmap=True)
+
+        self.assertEqual(projected["rmap_summary"]["record_count"], 3)
+        self.assertEqual(projected["rmap_summary"]["matched_interface_count"], 3)
+        self.assertEqual(
+            {match["kind"] for match in projected["rmap_matches"]},
+            {"remote_endpoint", "i2p_endpoint", "local_publication"},
+        )
 
 
 class LiveRNSCollectionTests(unittest.TestCase):
