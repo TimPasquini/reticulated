@@ -180,6 +180,33 @@ def _interface_mode(value: Any) -> str | Any:
         return value
 
 
+def _compact_endpoint(value: str, limit: int = 24) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:12] + "…" + value[-7:]
+
+
+def _interface_display_name(raw: dict[str, Any], full_name: str) -> str:
+    """Return a readable label while preserving malformed RNS fields in raw."""
+    short_name = raw.get("short_name")
+    if isinstance(short_name, str):
+        candidate = short_name.strip()
+        has_controls = any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+        if candidate and candidate.lower() not in {"none", "null"} and not has_controls:
+            return candidate
+
+    detail_match = re.search(r"\[([^\]]+)\]$", full_name)
+    detail = detail_match.group(1) if detail_match else full_name
+    interface_type = str(raw.get("type") or "Interface")
+    if interface_type == "LocalClientInterface":
+        return "Local client\n" + detail
+    if interface_type == "AutoInterfacePeer":
+        device, separator, endpoint = detail.partition("/")
+        suffix = _compact_endpoint(endpoint) if separator else _compact_endpoint(detail)
+        return "Auto peer " + device + ("\n" + suffix if suffix else "")
+    return _compact_endpoint(detail, 30)
+
+
 def _default_runner(command: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
     # No shell is used: command configuration cannot turn collection into an
     # arbitrary shell pipeline, and neither command can modify RNS state.
@@ -389,6 +416,7 @@ class LiveRNSProvider:
                 "id": f"interface:{fragment}",
                 "name": name,
                 "short_name": raw.get("short_name"),
+                "display_name": _interface_display_name(raw, name),
                 "interface_hash": interface_hash,
                 "type": raw.get("type"),
                 "mode": _interface_mode(raw.get("mode")),

@@ -159,7 +159,7 @@ const cy = cytoscape({
     { selector: "node.live-root.stale", style: { "opacity": 0.55, "border-width": 3, "border-style": "dashed", "border-color": "#d89b45" }},
     { selector: "node.live-root.rmap-matched", style: { "border-width": 3, "border-color": "#56b9bd" }},
     { selector: "node.live-interface", style: {
-      "shape": "round-rectangle", "width": 126, "height": 42, "background-color": "#356b82",
+      "shape": "round-rectangle", "width": 126, "height": 50, "background-color": "#356b82",
       "label": "data(label)", "color": "#eef8ff", "text-valign": "center", "text-halign": "center",
       "font-size": 10, "text-wrap": "wrap", "text-max-width": 120, "border-width": 2, "border-color": "#5292ad",
     }},
@@ -516,7 +516,7 @@ function rebuildLive(snapshot) {
     if (item.path_only) classes += " path-only";
     if (rmapMatches.length) classes += " rmap-matched";
     const rmapLabel = rmapMatches.length ? "\nRMAP: " + (rmapMatches[0].name || "matched") : "";
-    const interfaceLabel = item.short_name || item.name;
+    const interfaceLabel = item.display_name || item.short_name || item.name;
     els.push({ group: "nodes", data: { id: item.id, label: interfaceLabel + rmapLabel, liveKind: "interface", item: { ...item, rmap_matches: rmapMatches } }, classes: classes, position: positions[item.id] });
   }
   for (const item of snapshot.transports || []) {

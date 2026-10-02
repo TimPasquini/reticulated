@@ -130,6 +130,29 @@ class LiveRNSNormalizationTests(unittest.TestCase):
         self.assertEqual(len(state["interfaces"]), 1)
         self.assertTrue(state["interfaces"][0]["path_only"])
 
+    def test_replaces_invalid_rns_short_names_only_for_display(self):
+        status = {"interfaces": [
+            {
+                "name": "LocalInterface[rns/default]",
+                "short_name": "0@\x00rns/default",
+                "type": "LocalClientInterface",
+            },
+            {
+                "name": "AutoInterfacePeer[wlp4s0/fe80::e65f:1ff:fe97:3572]",
+                "short_name": "None",
+                "type": "AutoInterfacePeer",
+            },
+        ]}
+
+        state = LiveRNSProvider.normalize(status, [], label="Fedora")
+
+        self.assertEqual(state["interfaces"][0]["display_name"], "Local client\nrns/default")
+        self.assertEqual(state["interfaces"][0]["raw"]["short_name"], "0@\x00rns/default")
+        self.assertEqual(
+            state["interfaces"][1]["display_name"],
+            "Auto peer wlp4s0\nfe80::e65f:1ff:fe97:3572",
+        )
+
     def test_normalizes_rmap_discovery_without_claiming_adjacency(self):
         state = LiveRNSProvider.normalize(
             STATUS, PATHS, label="Patroon", discovered=DISCOVERED
