@@ -17,6 +17,7 @@ from . import config
 from .live_rns import LiveRNSProvider
 from .live_reports import LiveReportRegistry, validate_reporter_id
 from .live_layouts import LiveLayoutStore
+from .live_worker import PeriodicCollector
 from .rns_reporting import RNSReportListener
 from .manager import Simulator
 
@@ -31,6 +32,8 @@ live_layouts = LiveLayoutStore(config.LIVE_LAYOUTS_FILE)
 clients = set()
 clients_lock = asyncio.Lock()
 rns_report_listener: RNSReportListener | None = None
+live_collector: PeriodicCollector | None = None
+status_collector: PeriodicCollector | None = None
 
 
 class NodeBody(BaseModel):
@@ -141,33 +144,16 @@ async def broadcast(event):
 async def event_pump():
     while True:
         try:
-            # A permanently blocked Queue.get() keeps asyncio's default
-            # executor alive after Ctrl+C. The bounded wait lets cancellation
-            # complete promptly even when the simulator is idle.
-            event = await asyncio.to_thread(sim.events.get, True, 0.5)
+            event = sim.events.get_nowait()
         except queue.Empty:
+            await asyncio.sleep(0.1)
             continue
         await broadcast(event)
 
 
-async def status_pump():
-    while True:
-        await asyncio.sleep(3)
-        if sim.active:
-            data = await asyncio.to_thread(sim.all_status)
-            await broadcast({"type": "status", "nodes": data, "lxmf": sim.lxmf_map(), "media": sim.hub.snapshot()})
-
-
-async def live_rns_pump():
-    while True:
-        snapshot = await asyncio.to_thread(live_rns.collect)
-        live_reports.update(config.LIVE_RNS_REPORTER_ID, snapshot, local=True)
-        await asyncio.sleep(config.LIVE_RNS_INTERVAL)
-
-
 @asynccontextmanager
 async def lifespan(app):
-    global rns_report_listener
+    global live_collector, rns_report_listener, status_collector
     if config.LIVE_RNS_INGEST_ENABLED:
         rns_report_listener = RNSReportListener(
             live_reports,
@@ -183,21 +169,44 @@ async def lifespan(app):
         if service is not None:
             live_rns.register_local_service(service)
         print(f"Reticulated RNS ingest destination: {destination_hash}", flush=True)
-    tasks = [
-        asyncio.create_task(event_pump()),
-        asyncio.create_task(status_pump()),
-        asyncio.create_task(live_rns_pump()),
-    ]
+    live_collector = PeriodicCollector(
+        live_rns.collect,
+        lambda snapshot: live_reports.update(
+            config.LIVE_RNS_REPORTER_ID, snapshot, local=True
+        ),
+        config.LIVE_RNS_INTERVAL,
+    )
+    live_collector.start()
+    status_collector = PeriodicCollector(
+        lambda: (
+            {
+                "type": "status",
+                "nodes": sim.all_status(),
+                "lxmf": sim.lxmf_map(),
+                "media": sim.hub.snapshot(),
+            }
+            if sim.active else None
+        ),
+        lambda event: sim.events.put(event) if event is not None else None,
+        3,
+    )
+    status_collector.start()
+    tasks = [asyncio.create_task(event_pump())]
     try:
         yield
     finally:
+        if live_collector is not None:
+            live_collector.stop()
+        if status_collector is not None:
+            status_collector.stop()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         if rns_report_listener is not None:
             rns_report_listener.stop()
-        await asyncio.to_thread(live_reports.flush)
-        await asyncio.to_thread(sim.shutdown)
+        # Reports are persisted during normal updates. Avoid recompressing a
+        # large path cache in the signal handler just to return to the shell.
+        sim.shutdown()
 
 
 app = FastAPI(lifespan=lifespan)

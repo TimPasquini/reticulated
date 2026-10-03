@@ -29,7 +29,15 @@ def main():
     ]), flush=True)
 
     try:
-        uvicorn.run("sim.server:app", host=args.host, port=args.port, log_level="warning")
+        uvicorn.run(
+            "sim.server:app",
+            host=args.host,
+            port=args.port,
+            log_level="warning",
+            # Keep shutdown behaviour consistent on Python 3.13 instead of
+            # delegating signal handling to an optional uvloop installation.
+            loop="asyncio",
+        )
     except KeyboardInterrupt:
         # Uvicorn normally consumes SIGINT itself. If another interrupt lands
         # during cleanup, still return to the shell without a traceback.
