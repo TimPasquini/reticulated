@@ -255,7 +255,7 @@ class LiveReportRegistry:
         }
 
         reporter_roots_by_id: dict[str, dict[str, Any]] = {}
-        interfaces: list[dict[str, Any]] = []
+        interfaces_by_id: dict[str, dict[str, Any]] = {}
         transports: dict[str, dict[str, Any]] = {}
         rmap_interfaces: list[dict[str, Any]] = []
         local_services: list[dict[str, Any]] = []
@@ -304,19 +304,47 @@ class LiveReportRegistry:
             snapshot_interfaces = snapshot.get("interfaces", [])
             for interface in snapshot_interfaces:
                 original_id = interface["id"]
-                merged_id = f"reporter:{reporter_id}:{original_id}"
+                interface_hash = str(interface.get("interface_hash") or "").lower()
+                merged_id = (
+                    f"interface:{interface_hash}"
+                    if interface_hash
+                    else f"reporter:{reporter_id}:{original_id}"
+                )
                 id_map[original_id] = merged_id
             for interface in snapshot_interfaces:
                 original_id = interface["id"]
-                interfaces.append({
+                merged_id = id_map[original_id]
+                observation = {**interface, "reporter_id": reporter_id}
+                candidate = {
                     **interface,
-                    "id": id_map[original_id],
+                    "id": merged_id,
                     "parent_interface_id": id_map.get(
                         interface.get("parent_interface_id"),
                         interface.get("parent_interface_id"),
                     ),
                     "reporter_id": reporter_id,
-                })
+                    "observed_by": [reporter_id],
+                    "observations": [observation],
+                }
+                existing_interface = interfaces_by_id.get(merged_id)
+                if existing_interface is None:
+                    interfaces_by_id[merged_id] = candidate
+                else:
+                    existing_interface["observed_by"] = sorted(set(
+                        existing_interface["observed_by"] + [reporter_id]
+                    ))
+                    existing_interface["observations"].append(observation)
+                    # Entries are ordered with the primary reporter first.
+                    # Keep its value on conflicts, but fill fields it did not
+                    # report from the contributing observation.
+                    for key, value in candidate.items():
+                        if key not in {
+                            "id", "reporter_id", "observed_by", "observations", "raw"
+                        } and (
+                            existing_interface.get(key) is None
+                            or existing_interface.get(key) == ""
+                        ) and value is not None and value != "":
+                            existing_interface[key] = value
 
             for transport in snapshot.get("transports", []):
                 transport_hash = str(transport.get("hash"))
@@ -449,7 +477,7 @@ class LiveReportRegistry:
             "root": primary,
             "reporter_roots": reporter_roots,
             "reporters": reporter_metadata,
-            "interfaces": interfaces,
+            "interfaces": list(interfaces_by_id.values()),
             "transports": merged_transports,
             "destinations": destinations,
             "rmap_interfaces": rmap_interfaces,

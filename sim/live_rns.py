@@ -512,10 +512,19 @@ class LiveRNSProvider:
                 "path_only": False,
                 "raw": raw,
             }
-            if item["id"] in interface_by_id:
+            existing = interface_by_id.get(item["id"])
+            if existing is not None:
                 # Some shared-instance status responses can repeat the same
-                # concrete interface. Its stable hash identifies one graph
-                # object, so do not emit duplicate nodes or edges.
+                # concrete interface. Merge complementary fields into one
+                # graph object and retain every raw observation for diagnosis.
+                observations = existing.setdefault("raw_observations", [existing["raw"]])
+                observations.append(raw)
+                for key, value in item.items():
+                    if key not in {"id", "raw", "raw_observations"} and (
+                        existing.get(key) is None or existing.get(key) == ""
+                    ) and value is not None and value != "":
+                        existing[key] = value
+                interface_by_name[name] = existing
                 continue
             interfaces.append(item)
             interface_by_id[item["id"]] = item

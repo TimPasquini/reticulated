@@ -73,6 +73,36 @@ class LiveReportRegistryTests(unittest.TestCase):
             "observed_by": ["fedora"],
         }])
 
+    def test_network_merges_same_stable_interface_across_reporters(self):
+        interface_hash = "a" * 64
+        patroon = snapshot("Patroon", transport_id="patroon")
+        patroon["interfaces"] = [{
+            "id": f"interface:{interface_hash}",
+            "interface_hash": interface_hash,
+            "name": "Garage LAN",
+            "mtu": None,
+        }]
+        fedora = snapshot("Fedora")
+        fedora["interfaces"] = [{
+            "id": f"interface:{interface_hash}",
+            "interface_hash": interface_hash.upper(),
+            "name": "Garage LAN observed by Fedora",
+            "mtu": 500,
+        }]
+
+        registry = LiveReportRegistry()
+        registry.update("patroon", patroon, local=True)
+        registry.update("fedora", fedora)
+        network = registry.network()
+
+        self.assertEqual(len(network["interfaces"]), 1)
+        merged = network["interfaces"][0]
+        self.assertEqual(merged["id"], f"interface:{interface_hash}")
+        self.assertEqual(merged["name"], "Garage LAN")
+        self.assertEqual(merged["mtu"], 500)
+        self.assertEqual(merged["observed_by"], ["fedora", "patroon"])
+        self.assertEqual(len(merged["observations"]), 2)
+
     def test_network_unifies_reporter_roots_and_keeps_closest_path_observation(self):
         fedora = snapshot("Fedora", observed=("patroon-hash",))
         fedora["interfaces"] = [

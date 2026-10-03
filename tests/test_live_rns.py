@@ -166,13 +166,18 @@ class LiveRNSNormalizationTests(unittest.TestCase):
             "short_name": "rns/test",
             "hash": "3" * 64,
             "type": "LocalClientInterface",
+            "mtu": None,
         }
+        second = dict(interface)
+        second["mtu"] = 500
         state = LiveRNSProvider.normalize(
-            {"interfaces": [interface, dict(interface)]}, [], label="Test"
+            {"interfaces": [interface, second]}, [], label="Test"
         )
 
         self.assertEqual(len(state["interfaces"]), 1)
         self.assertEqual(len(state["edges"]), 1)
+        self.assertEqual(state["interfaces"][0]["mtu"], 500)
+        self.assertEqual(len(state["interfaces"][0]["raw_observations"]), 2)
 
     def test_replaces_invalid_rns_short_names_only_for_display(self):
         status = {"interfaces": [
