@@ -40,7 +40,11 @@ SIM_PORT=9000 SIM_HUB_PORT=5900 python run.py
 The UI has two independent modes. **Simulation** retains the original editable
 simulator. **Live RNS** is a read-only view of the local shared Reticulum
 instance. It polls `rnstatus -j` and `rnpath -t -j` every five seconds and
-exposes the normalized result at `GET /api/live/state`.
+exposes the normalized result at `GET /api/live/state`. Live mode has both a
+logical **Topology** view and a geographic **Map** view. The map places only
+RMAP records containing valid latitude/longitude data, draws hop-depth
+observations without inventing intermediate routers, and preserves its
+viewport across refreshes and browser sessions.
 
 Run Reticulated as the same user that can access the shared RNS instance, then
 select **Live RNS** in the toolbar. The local hostname is used for the root
@@ -159,14 +163,15 @@ An active local client interface whose endpoint matches an advertised RMAP
 interface also becomes a confirmed one-hop **attachment** between transport
 nodes. These attachment edges form a structural graph suitable for shortest
 known-attachment paths; they are not assertions about the route Reticulum will
-choose for a packet. Future geographic rendering can place RMAP transports with
-real coordinates on the map and cluster unlocated nodes near their closest
-confirmed anchor in screen space without inventing coordinates.
+choose for a packet. The geographic view places RMAP transports with real
+coordinates and leaves unlocated nodes off the geographic layer instead of
+inventing locations.
 
 The default **All reporters** view draws one evidence graph. The server's local
 report is primary, transport identities shared between reports become the same
-graph node, and reporter-specific interfaces remain distinct. A reporter whose
-transport identity is an observed primary next hop can refine the primary path
+graph node, and interfaces sharing a stable interface hash are merged while
+retaining every reporter observation. Unhashed interfaces remain distinct. A
+reporter whose transport identity is an observed primary next hop can refine the primary path
 with its closer observation. A disconnected reporter cannot replace the
 primary's route merely because it is locally closer. Every retained destination
 identifies the reporter that observed it, and individual reporter views remain

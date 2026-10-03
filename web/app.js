@@ -42,6 +42,10 @@ const state = {
   liveReporters: [],
   showLiveDestinationSummaries: false,
   showLiveRmap: false,
+  liveView: "topology",
+  liveMap: null,
+  liveMapLayers: null,
+  liveMapHasInitialView: false,
   liveLayoutPending: true,
   liveLayoutRunning: false,
   liveSlots: {},
@@ -622,6 +626,198 @@ function updateLivePinButton() {
     ? "Unpin node" : "Pin node";
 }
 
+function validCoordinate(latitude, longitude) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  return Number.isFinite(lat) && Number.isFinite(lon) &&
+    lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+}
+
+function liveMapViewportKey() {
+  return "reticulated.live-map." + liveLayoutScope();
+}
+
+function saveLiveMapViewport() {
+  if (!state.liveMap) return;
+  const center = state.liveMap.getCenter();
+  try {
+    localStorage.setItem(liveMapViewportKey(), JSON.stringify({
+      center: [center.lat, center.lng], zoom: state.liveMap.getZoom(),
+    }));
+  } catch (error) {}
+}
+
+function restoreLiveMapViewport() {
+  if (!state.liveMap) return false;
+  try {
+    const viewport = JSON.parse(localStorage.getItem(liveMapViewportKey()));
+    if (viewport && Array.isArray(viewport.center) && Number.isFinite(viewport.zoom)) {
+      state.liveMap.setView(viewport.center, viewport.zoom, { animate: false });
+      return true;
+    }
+  } catch (error) {}
+  return false;
+}
+
+function ensureLiveMap() {
+  if (state.liveMap || typeof L === "undefined") return state.liveMap;
+  state.liveMap = L.map("live-map", { worldCopyJump: true, preferCanvas: true });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  }).addTo(state.liveMap);
+  state.liveMapLayers = L.layerGroup().addTo(state.liveMap);
+  state.liveMap.setView([20, 0], 2);
+  state.liveMap.on("moveend zoomend", saveLiveMapViewport);
+  return state.liveMap;
+}
+
+function rmapRecordLabel(record) {
+  return record.name || record.interface_name || record.transport_id || "RMAP node";
+}
+
+function mapHopStyle(hops) {
+  if (hops === 1) return { color: "#3b82f6", weight: 3, dashArray: null };
+  if (hops === 2) return { color: "#10b981", weight: 2, dashArray: "7 5" };
+  if (hops === 3) return { color: "#f59e0b", weight: 2, dashArray: "7 5" };
+  return { color: "#a855f7", weight: 2, dashArray: "7 6" };
+}
+
+function renderLiveMap(snapshot) {
+  const map = ensureLiveMap();
+  const summary = document.getElementById("live-map-summary");
+  if (!map) {
+    summary.textContent = "Map library could not be loaded.";
+    return;
+  }
+  state.liveMapLayers.clearLayers();
+  const roots = snapshot.reporter_roots || [snapshot.root];
+  const rootIds = new Set(roots.map((root) => String(root.transport_id || "")));
+  const rootByReporter = new Map(roots.map((root) => [root.reporter_id, root]));
+  const defaultRoot = snapshot.root || roots[0] || {};
+  const recordsByTransport = new Map();
+  for (const record of snapshot.rmap_interfaces || []) {
+    if (!validCoordinate(record.latitude, record.longitude)) continue;
+    const transportId = String(record.transport_id || record.id || "");
+    if (!transportId) continue;
+    if (!recordsByTransport.has(transportId)) recordsByTransport.set(transportId, []);
+    recordsByTransport.get(transportId).push(record);
+  }
+
+  const coordinates = new Map();
+  const bounds = [];
+  for (const [transportId, records] of recordsByTransport) {
+    const record = records[0];
+    const latlng = [Number(record.latitude), Number(record.longitude)];
+    coordinates.set("transport:" + transportId, latlng);
+    bounds.push(latlng);
+    const isReporter = rootIds.has(transportId);
+    const marker = L.circleMarker(latlng, {
+      radius: isReporter ? 9 : 6,
+      color: isReporter ? "#f2c94c" : "#dbeafe",
+      weight: isReporter ? 3 : 2,
+      fillColor: isReporter ? "#8b5cf6" : "#16a085",
+      fillOpacity: 0.92,
+    });
+    const reporters = Array.from(new Set(records.map((item) => item.reporter_id).filter(Boolean)));
+    marker.bindPopup('<div class="live-map-popup"><strong>' + escapeHtml(rmapRecordLabel(record)) +
+      '</strong><span class="mono">' + escapeHtml(transportId) + '</span>' +
+      '<div>' + escapeHtml(record.type || "RMAP interface") + '</div>' +
+      '<div>' + latlng[0].toFixed(5) + ", " + latlng[1].toFixed(5) + '</div>' +
+      (reporters.length ? '<div>Reported by: ' + escapeHtml(reporters.join(", ")) + '</div>' : "") +
+      '<div class="muted">Location supplied by RMAP</div></div>');
+    marker.addTo(state.liveMapLayers);
+  }
+
+  for (const match of snapshot.rmap_matches || []) {
+    if (!validCoordinate(match.latitude, match.longitude)) continue;
+    coordinates.set(match.interface_id, [Number(match.latitude), Number(match.longitude)]);
+  }
+
+  const drawn = new Set();
+  for (const attachment of snapshot.rmap_attachments || []) {
+    const source = coordinates.get(attachment.source);
+    const target = coordinates.get(attachment.target) || (
+      validCoordinate(attachment.latitude, attachment.longitude)
+        ? [Number(attachment.latitude), Number(attachment.longitude)] : null
+    );
+    if (!source || !target) continue;
+    const key = attachment.source + "|" + attachment.target;
+    if (drawn.has(key)) continue;
+    drawn.add(key);
+    L.polyline([source, target], {
+      color: attachment.interface_online === true ? "#3b82f6" : "#94a3b8",
+      weight: attachment.interface_online === true ? 3 : 2,
+      opacity: 0.8,
+      dashArray: attachment.interface_online === true ? null : "7 7",
+    }).bindTooltip(
+      attachment.interface_online === true ? "Observed one-hop attachment" : "Configured one-hop attachment"
+    ).addTo(state.liveMapLayers);
+  }
+
+  const routeCandidates = new Map();
+  for (const record of snapshot.rmap_interfaces || []) {
+    const root = rootByReporter.get(record.reporter_id) || defaultRoot;
+    const sourceId = root.transport_id ? "transport:" + root.transport_id : null;
+    const targetId = record.transport_id ? "transport:" + record.transport_id : null;
+    const source = sourceId ? coordinates.get(sourceId) : null;
+    const target = targetId ? coordinates.get(targetId) : null;
+    const hops = Number(record.hops);
+    if (!source || !target || !Number.isFinite(hops) || hops < 1 || sourceId === targetId) continue;
+    const key = sourceId + "|" + targetId;
+    const existing = routeCandidates.get(key);
+    if (!existing || hops < existing.hops) {
+      routeCandidates.set(key, { source, target, hops, reporter: root.label || record.reporter_id });
+    }
+  }
+  for (const [key, route] of routeCandidates) {
+    if (drawn.has(key)) continue;
+    drawn.add(key);
+    const style = mapHopStyle(route.hops);
+    L.polyline([route.source, route.target], {
+      ...style, opacity: 0.78,
+    }).bindTooltip(
+      route.hops + "-hop RMAP reachability from " + route.reporter +
+      (route.hops > 1 ? " · intermediate transports unknown" : " · direct")
+    ).addTo(state.liveMapLayers);
+  }
+
+  summary.innerHTML = '<strong>' + recordsByTransport.size + " geolocated RMAP node" +
+    (recordsByTransport.size === 1 ? "" : "s") + "</strong> · " + drawn.size +
+    " mapped relationship" + (drawn.size === 1 ? "" : "s") +
+    '<div class="map-legend"><span class="hop-1">1 hop</span><span class="hop-2">2 hops</span>' +
+    '<span class="hop-3">3 hops</span><span class="hop-4">4+ hops</span></div>' +
+    '<div class="muted">Multi-hop lines show reachability, not invented intermediate routers. Unlocated nodes are not assigned coordinates.</div>';
+  if (!state.liveMapHasInitialView) {
+    state.liveMapHasInitialView = true;
+    if (!restoreLiveMapViewport() && bounds.length) {
+      map.fitBounds(bounds, { padding: [45, 45], maxZoom: 7, animate: false });
+    }
+  }
+}
+
+function setLiveView(view) {
+  state.liveView = view === "map" ? "map" : "topology";
+  const showingMap = state.liveView === "map";
+  document.getElementById("cy").classList.toggle("hidden", showingMap);
+  document.getElementById("live-map").classList.toggle("hidden", !showingMap);
+  document.getElementById("btn-live-topology").classList.toggle("active", !showingMap);
+  document.getElementById("btn-live-map").classList.toggle("active", showingMap);
+  if (showingMap) {
+    requestAnimationFrame(() => {
+      const map = ensureLiveMap();
+      if (map) map.invalidateSize();
+      if (state.live) renderLiveMap(state.live);
+      loadLiveState();
+    });
+  } else {
+    requestAnimationFrame(() => {
+      cy.resize();
+      if (state.live) rebuildLive(state.live);
+    });
+  }
+}
+
 function rebuildLive(snapshot) {
   const hadLiveGraph = cy.nodes(".live-root").length > 0;
   const oldPan = { ...cy.pan() };
@@ -779,14 +975,15 @@ async function loadLiveState() {
     await ensureLiveLayoutScope(state.liveReporterId);
     const query = new URLSearchParams();
     if (state.showLiveDestinationSummaries) query.set("include_paths", "true");
-    if (state.showLiveRmap) query.set("include_rmap", "true");
+    if (state.showLiveRmap || state.liveView === "map") query.set("include_rmap", "true");
     const endpoint = state.liveReporterId === "all"
       ? "/api/live/network"
       : "/api/live/reporters/" + encodeURIComponent(state.liveReporterId) + "/state";
     const snapshot = await api.get(endpoint + (query.size ? "?" + query.toString() : ""));
     state.live = snapshot;
     updateLiveHealth(snapshot);
-    rebuildLive(snapshot);
+    if (state.liveView === "map") renderLiveMap(snapshot);
+    else rebuildLive(snapshot);
   } catch (error) {
     const health = document.getElementById("live-health");
     health.textContent = "Live API unavailable";
@@ -821,8 +1018,16 @@ function setOperatingMode(mode) {
   document.getElementById("mode-live").classList.toggle("active", live);
   state.trafficPick = [];
   showPanel(null);
-  if (live) { state.liveLayoutPending = true; loadLiveState(); }
-  else { rebuild(); updateTrafficBox(); }
+  if (live) {
+    state.liveLayoutPending = true;
+    setLiveView(state.liveView);
+    if (state.liveView === "topology") loadLiveState();
+  } else {
+    document.getElementById("live-map").classList.add("hidden");
+    document.getElementById("cy").classList.remove("hidden");
+    rebuild();
+    updateTrafficBox();
+  }
 }
 
 function liveValue(value) {
@@ -1437,12 +1642,14 @@ document.getElementById("btn-stop").onclick = () => api.post("/api/stop");
 document.getElementById("mode-simulation").onclick = () => setOperatingMode("simulation");
 document.getElementById("mode-live").onclick = () => setOperatingMode("live");
 document.getElementById("live-reporter").onchange = (event) => {
+  saveLiveMapViewport();
   state.liveReporterId = event.target.value;
   state.live = null;
   state.liveLayoutPending = true;
   state.liveLayoutScope = null;
   state.liveSavedLayout = null;
   state.livePinned = new Set();
+  state.liveMapHasInitialView = false;
   cy.elements().remove();
   loadLiveState();
 };
@@ -1488,6 +1695,8 @@ document.getElementById("btn-live-rmap").onclick = () => {
   document.getElementById("btn-live-rmap").textContent = state.showLiveRmap ? "Hide RMAP metadata" : "Show RMAP metadata";
   loadLiveState();
 };
+document.getElementById("btn-live-topology").onclick = () => setLiveView("topology");
+document.getElementById("btn-live-map").onclick = () => setLiveView("map");
 document.getElementById("btn-live-destinations").onclick = () => {
   state.showLiveDestinationSummaries = !state.showLiveDestinationSummaries;
   state.liveLayoutPending = true;
@@ -1975,6 +2184,7 @@ if (initialQuery.get("paths") === "true") {
   state.showLiveDestinationSummaries = true;
   document.getElementById("btn-live-destinations").textContent = "Hide path summaries";
 }
+if (initialQuery.get("view") === "map") setLiveView("map");
 if (initialQuery.get("mode") === "live") setOperatingMode("live");
 else loadState();
 connectWs();
