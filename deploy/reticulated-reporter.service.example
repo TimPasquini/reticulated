@@ -8,10 +8,11 @@ Type=simple
 User=tim
 WorkingDirectory=/home/tim/python_repos/reticulated
 EnvironmentFile=/etc/reticulated/reporter.env
-ExecStart=/home/tim/python_repos/reticulated/.venv/bin/python -m sim.reporter --server http://garage-reticulum-node:8765 --id fedora-laptop --label "Fedora laptop" --rnstatus /home/tim/.local/bin/rnstatus --rnpath /home/tim/.local/bin/rnpath
+ExecStart=/home/tim/python_repos/reticulated/.venv/bin/python -m sim.reporter --rns-destination REPLACE_WITH_PATROON_INGEST_HASH --identity /var/lib/reticulated/reporter.identity --id fedora-laptop --label "Fedora laptop" --rnstatus /home/tim/.local/bin/rnstatus --rnpath /home/tim/.local/bin/rnpath
 Restart=on-failure
 RestartSec=10
 UMask=0077
+StateDirectory=reticulated
 
 [Install]
 WantedBy=multi-user.target

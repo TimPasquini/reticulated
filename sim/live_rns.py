@@ -290,7 +290,16 @@ class LiveRNSProvider:
         self._last_status: dict[str, Any] | None = None
         self._last_paths: list[dict[str, Any]] | None = None
         self._last_discovered: list[dict[str, Any]] | None = None
+        self._registered_services: dict[str, dict[str, Any]] = {}
         self._state = self._empty_state()
+
+    def register_local_service(self, service: dict[str, Any]) -> None:
+        """Add an application-owned destination to local service enrichment."""
+        destination_hash = str(service.get("destination_hash") or "").lower()
+        if not destination_hash:
+            raise ValueError("local service requires a destination hash")
+        with self._lock:
+            self._registered_services[destination_hash] = dict(service)
 
     def _empty_state(self) -> dict[str, Any]:
         return {
@@ -394,6 +403,14 @@ class LiveRNSProvider:
             # Service enrichment must never interrupt the core rnstatus/rnpath
             # observation loop.
             local_services, service_errors = [], [str(exc)]
+        with self._lock:
+            registered_services = list(self._registered_services.values())
+        services_by_hash = {
+            str(service.get("destination_hash") or "").lower(): service
+            for service in local_services + registered_services
+            if service.get("destination_hash")
+        }
+        local_services = list(services_by_hash.values())
         service_health = {
             "ok": not service_errors,
             "error": "; ".join(service_errors) if service_errors else None,

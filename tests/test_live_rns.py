@@ -273,6 +273,26 @@ class LiveRNSCollectionTests(unittest.TestCase):
         self.assertIn("timed out", stale["health"]["rnstatus"]["error"])
         self.assertIn("skipped", stale["health"]["rnpath"]["error"])
 
+    def test_application_owned_service_is_included_in_collection(self):
+        responses = iter([
+            SimpleNamespace(returncode=0, stdout=json.dumps(STATUS), stderr=""),
+            SimpleNamespace(returncode=0, stdout=json.dumps(PATHS), stderr=""),
+            SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr=""),
+        ])
+
+        provider = LiveRNSProvider(runner=lambda command, timeout: next(responses))
+        provider.register_local_service({
+            "destination_hash": "a" * 32,
+            "name": "Reticulated topology ingest",
+            "type": "reticulated_topology_ingest",
+        })
+        state = provider.collect()
+
+        self.assertTrue(any(
+            service["type"] == "reticulated_topology_ingest"
+            for service in state["local_services"]
+        ))
+
     def test_zero_hop_local_path_does_not_create_a_transport(self):
         destination_hash = "c" * 32
         local_path = [{

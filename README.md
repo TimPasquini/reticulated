@@ -83,32 +83,55 @@ they are reserved for a separately designed, authenticated management mode.
 ### Multiple reporters
 
 A Reticulated instance can aggregate read-only observations from other nodes we
-control. The server always registers its own local RNS observation. Set a token
-to enable remote report ingestion:
+control. The server always registers its own local RNS observation. The primary
+report transport is an encrypted, authenticated Reticulum Link to a dedicated
+ingest destination; no public HTTP endpoint or bearer token is required.
 
-```bash
-RETICULATED_REPORT_TOKEN='replace-with-a-long-random-token' \
-LIVE_RNS_REPORTER_ID=patroon \
-LIVE_RNS_LABEL=Patroon \
-python run.py --host 0.0.0.0 --port 8765
+```text
+Fedora / Vehicle collector
+  -> shared local RNS instance
+  -> authenticated Link (Resource for large reports)
+  -> Patroon topology-ingest destination
+  -> in-memory report registry
+  -> combined evidence graph and UI
+
+Patroon's own collector --------------------^ (primary report)
 ```
 
-Keep this listener on the trusted LAN; this does not require a WAN port, public
-DNS, or changes to Patroon's I2P gateway. On Fedora, send an observation every
-30 seconds with:
+First create the reporter's stable identity and print its hash:
 
 ```bash
-RETICULATED_REPORT_TOKEN='the-same-token' \
 python -m sim.reporter \
-  --server http://garage-reticulum-node:8765 \
+  --identity /var/lib/reticulated/reporter.identity \
+  --print-identity
+```
+
+Add that 32-character identity hash to `/etc/reticulated/reporters.json`, bound
+to exactly one reporter ID. See `deploy/reporters.json.example`. Enable the
+listener on Patroon with `LIVE_RNS_INGEST_ENABLED=true`; its persistent ingest
+identity and allowlist paths are shown in `deploy/reticulated.env.example`.
+At startup the server logs its ingest destination hash, and the same value is
+available from `GET /api/live/reporters`.
+
+On Fedora, use that destination hash to send an observation every 30 seconds:
+
+```bash
+python -m sim.reporter \
+  --rns-destination PATROON_INGEST_DESTINATION_HASH \
+  --identity /var/lib/reticulated/reporter.identity \
   --id fedora-laptop \
   --label 'Fedora laptop'
 ```
 
 The reporter gzip-compresses normalized `rnstatus -j`, `rnpath -t -j`, and
-`rnstatus -d -j` observations. It never invokes interface management or other
-mutating RNS commands. Reports are kept in memory and replaced atomically;
-after a server restart, each node repopulates its entry on its next interval.
+`rnstatus -d -j` observations inside a versioned RNS request. RNS automatically
+uses a Resource when a snapshot is larger than one packet. The listener accepts
+only identified peers in its allowlist and verifies that the claimed reporter
+ID matches the identity's enrollment. The reporter never invokes interface
+management or other mutating RNS commands. Reports are kept in memory and
+replaced atomically; after a server restart, each node repopulates its entry on
+its next interval. The older `--server` HTTP mode remains available for LAN
+debugging and compatibility.
 
 `rnstatus -d -j` supplies RMAP discovery records received by that reporter; it
 is not a list of the reporter's own interfaces. In the combined view,
@@ -140,10 +163,10 @@ Useful endpoints are:
 - `GET /api/live/reporters`
 - `GET /api/live/network`
 - `GET /api/live/reporters/{id}/state`
-- `POST /api/live/reporters/{id}` (Bearer token required)
+- `POST /api/live/reporters/{id}` (optional HTTP compatibility path; token required)
 
-Example systemd units and environment files are in `deploy/`. Generate a
-unique token, protect the environment file, and adjust repository paths before
-installing them.
+Example systemd units, environment files, and the reporter allowlist format are
+in `deploy/`. Protect identity and configuration files and adjust repository
+paths before installing them.
 
 Each node's `instance_name` is derived from the data directory under simdata/

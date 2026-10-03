@@ -12,6 +12,7 @@ ExecStart=/home/tim/reticulated/.venv/bin/python run.py --host 0.0.0.0 --port 87
 Restart=on-failure
 RestartSec=5
 UMask=0077
+StateDirectory=reticulated
 
 [Install]
 WantedBy=multi-user.target

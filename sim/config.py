@@ -29,6 +29,18 @@ LIVE_RNS_REPORTER_ID = os.environ.get("LIVE_RNS_REPORTER_ID", socket.gethostname
 LIVE_REPORT_TOKEN = os.environ.get("RETICULATED_REPORT_TOKEN")
 LIVE_REPORT_STALE_AFTER = float(os.environ.get("LIVE_REPORT_STALE_AFTER", "90"))
 LIVE_REPORT_MAX_BYTES = int(os.environ.get("LIVE_REPORT_MAX_BYTES", str(16 * 1024 * 1024)))
+LIVE_RNS_INGEST_ENABLED = os.environ.get("LIVE_RNS_INGEST_ENABLED", "false").lower() in (
+    "1", "true", "yes", "on"
+)
+LIVE_RNS_INGEST_IDENTITY = os.environ.get(
+    "LIVE_RNS_INGEST_IDENTITY", os.path.join(DATA_DIR, "topology-ingest.identity")
+)
+LIVE_RNS_INGEST_ALLOWLIST = os.environ.get(
+    "LIVE_RNS_INGEST_ALLOWLIST", os.path.join(DATA_DIR, "reporters.json")
+)
+LIVE_RNS_INGEST_ANNOUNCE_INTERVAL = float(
+    os.environ.get("LIVE_RNS_INGEST_ANNOUNCE_INTERVAL", "300")
+)
 
 BRIDGE_HOST = os.environ.get("SIM_BRIDGE_HOST", "127.0.0.1")
 TCP_BASE = int(os.environ.get("SIM_TCP_BASE", "6000"))

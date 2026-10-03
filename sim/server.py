@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from . import config
 from .live_rns import LiveRNSProvider
 from .live_reports import LiveReportRegistry, validate_reporter_id
+from .rns_reporting import RNSReportListener
 from .manager import Simulator
 
 sim = Simulator()
@@ -22,6 +23,7 @@ live_rns = LiveRNSProvider()
 live_reports = LiveReportRegistry(stale_after=config.LIVE_REPORT_STALE_AFTER)
 clients = set()
 clients_lock = asyncio.Lock()
+rns_report_listener: RNSReportListener | None = None
 
 
 class NodeBody(BaseModel):
@@ -147,6 +149,22 @@ async def live_rns_pump():
 
 @asynccontextmanager
 async def lifespan(app):
+    global rns_report_listener
+    if config.LIVE_RNS_INGEST_ENABLED:
+        rns_report_listener = RNSReportListener(
+            live_reports,
+            identity_path=config.LIVE_RNS_INGEST_IDENTITY,
+            allowlist_path=config.LIVE_RNS_INGEST_ALLOWLIST,
+            local_reporter_id=config.LIVE_RNS_REPORTER_ID,
+            config_dir=config.LIVE_RNS_CONFIG_DIR,
+            max_bytes=config.LIVE_REPORT_MAX_BYTES,
+            announce_interval=config.LIVE_RNS_INGEST_ANNOUNCE_INTERVAL,
+        )
+        destination_hash = await asyncio.to_thread(rns_report_listener.start)
+        service = rns_report_listener.service_info()
+        if service is not None:
+            live_rns.register_local_service(service)
+        print(f"Reticulated RNS ingest destination: {destination_hash}", flush=True)
     pump = asyncio.create_task(event_pump())
     poller = asyncio.create_task(status_pump())
     live_poller = asyncio.create_task(live_rns_pump())
@@ -154,6 +172,8 @@ async def lifespan(app):
     pump.cancel()
     poller.cancel()
     live_poller.cancel()
+    if rns_report_listener is not None:
+        rns_report_listener.stop()
     sim.shutdown()
 
 
@@ -184,6 +204,12 @@ def get_live_reporters():
         "reporters": live_reports.list(),
         "correlations": live_reports.correlations(),
         "remote_ingest_enabled": bool(config.LIVE_REPORT_TOKEN),
+        "rns_ingest": {
+            "enabled": rns_report_listener is not None,
+            "destination_hash": (
+                rns_report_listener.destination_hash if rns_report_listener else None
+            ),
+        },
     }
 
 
