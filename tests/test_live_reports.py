@@ -75,7 +75,13 @@ class LiveReportRegistryTests(unittest.TestCase):
 
     def test_network_unifies_reporter_roots_and_keeps_closest_path_observation(self):
         fedora = snapshot("Fedora", observed=("patroon-hash",))
-        fedora["interfaces"] = [{"id": "interface:lan", "name": "Garage LAN"}]
+        fedora["interfaces"] = [
+            {"id": "interface:lan", "name": "Garage LAN"},
+            {
+                "id": "interface:peer", "name": "Garage peer",
+                "parent_interface_id": "interface:lan",
+            },
+        ]
         fedora["transports"][0]["interface_ids"] = ["interface:lan"]
         fedora["destinations"] = [{
             "id": "destination:shared", "hash": "shared", "hops": 3,
@@ -104,6 +110,7 @@ class LiveReportRegistryTests(unittest.TestCase):
         registry.update("patroon", patroon, local=True)
         registry.update("fedora", fedora)
         network = registry.network(include_paths=True)
+        compact = registry.network()
 
         self.assertEqual(network["root"]["id"], "transport:patroon-hash")
         self.assertEqual(
@@ -122,6 +129,11 @@ class LiveReportRegistryTests(unittest.TestCase):
             edge["target"] == "transport:patroon-hash" and edge["kind"] == "observed_next_hop"
             for edge in network["edges"]
         ))
+        peer = next(item for item in network["interfaces"] if item["name"] == "Garage peer")
+        self.assertEqual(peer["parent_interface_id"], "reporter:fedora:interface:lan")
+        self.assertEqual(compact["destinations"], [])
+        self.assertEqual(compact["path_summary"]["destination_count"], 1)
+        self.assertEqual(compact["path_summary"]["by_transport"], {"backbone-hop": 1})
 
     def test_connected_transport_reporter_refines_primary_path(self):
         patroon = snapshot("Patroon", transport_id="patroon", observed=("vehicle",))
@@ -205,10 +217,12 @@ class LiveReportRegistryTests(unittest.TestCase):
         registry.update("patroon", patroon, local=True)
         registry.update("fedora", fedora)
         network = registry.network()
+        fedora_view = registry.get("fedora")
 
         self.assertEqual(len(network["destinations"]), 1)
         self.assertEqual(network["destinations"][0]["local_service"]["name"], "Patroon rnsh")
         self.assertEqual(network["destinations"][0]["service_reporters"], ["patroon"])
+        self.assertEqual(fedora_view["destinations"][0]["local_service"]["name"], "Patroon rnsh")
 
     def test_rejects_invalid_ids_and_payloads(self):
         with self.assertRaises(ValueError):

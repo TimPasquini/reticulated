@@ -153,7 +153,10 @@ def topology_snapshot(
     source: dict[str, Any], *, include_paths: bool = False, include_rmap: bool = False
 ) -> dict[str, Any]:
     """Project a full normalized report into the requested API representation."""
-    state = json.loads(json.dumps(source))
+    # This projection only replaces top-level collections; it never mutates
+    # normalized objects. A shallow copy avoids duplicating tens of thousands
+    # of path dictionaries on every five-second API poll.
+    state = dict(source)
     destinations = state.get("destinations", [])
     counts_by_transport: dict[str, int] = {}
     for destination in destinations:
@@ -161,7 +164,8 @@ def topology_snapshot(
         if via:
             key = str(via)
             counts_by_transport[key] = counts_by_transport.get(key, 0) + 1
-    state["path_summary"] = {
+    provided_path_summary = state.pop("_path_summary", None)
+    state["path_summary"] = provided_path_summary or {
         "destination_count": len(destinations),
         "by_transport": counts_by_transport,
     }
@@ -478,6 +482,7 @@ class LiveRNSProvider:
         interfaces: list[dict[str, Any]] = []
         interface_by_name: dict[str, dict[str, Any]] = {}
         interface_by_hash: dict[str, dict[str, Any]] = {}
+        interface_by_id: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
         for raw in status.get("interfaces", []):
             name = str(raw.get("name") or raw.get("short_name") or "Unnamed interface")
@@ -507,7 +512,13 @@ class LiveRNSProvider:
                 "path_only": False,
                 "raw": raw,
             }
+            if item["id"] in interface_by_id:
+                # Some shared-instance status responses can repeat the same
+                # concrete interface. Its stable hash identifies one graph
+                # object, so do not emit duplicate nodes or edges.
+                continue
             interfaces.append(item)
+            interface_by_id[item["id"]] = item
             interface_by_name[name] = item
             if interface_hash:
                 interface_by_hash[str(interface_hash).lower()] = item

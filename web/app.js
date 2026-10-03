@@ -559,8 +559,9 @@ function applyLivePins() {
   cy.nodes("[liveKind]").forEach((node) => {
     const pinned = state.livePinned.has(node.id());
     node.toggleClass("live-pinned", pinned);
-    if (pinned) node.lock();
-    else node.unlock();
+    // Pinning constrains automatic layouts, but manual dragging must remain
+    // available so an anchor can be repositioned without first unpinning it.
+    node.unlock();
   });
   updateLivePinButton();
 }
@@ -643,9 +644,10 @@ function rebuildLive(snapshot) {
   const rootIds = new Set(roots.map((root) => root.id));
   for (const root of roots) {
     const role = root.primary ? "\nprimary reporter" : "\nreporter";
+    const staleLabel = root.report_stale ? "\nstale snapshot" : "";
     const rmapRecords = renderModel.rmapMatches[root.id] || [];
     const rmapLabel = rmapRecords.length ? "\nRMAP matched" : "";
-    const label = root.label + (roots.length > 1 ? role : "") + rmapLabel;
+    const label = root.label + (roots.length > 1 ? role : "") + staleLabel + rmapLabel;
     let classes = "live-root" + (root.primary ? " primary" : " secondary");
     if (rmapRecords.length) classes += " rmap-matched";
     if (root.report_stale) classes += " stale";
@@ -1725,6 +1727,9 @@ function runLiveLayout(animate) {
   const fixedNodeConstraint = cy.nodes("[liveKind]").filter((node) =>
     state.livePinned.has(node.id())
   ).map((node) => ({ nodeId: node.id(), position: { ...node.position() } }));
+  fixedNodeConstraint.forEach((constraint) => {
+    cy.getElementById(constraint.nodeId).lock();
+  });
 
   // Pass 1 uses fCoSE's spectral stage to quickly pull apart the hand-seeded
   // rows and give the force solver a topology-aware starting point.

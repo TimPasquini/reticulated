@@ -160,6 +160,20 @@ class LiveRNSNormalizationTests(unittest.TestCase):
         self.assertEqual(peer_edge["source"], parent["id"])
         self.assertEqual(peer_edge["kind"], "observed_peer_interface")
 
+    def test_duplicate_interface_hash_is_emitted_once(self):
+        interface = {
+            "name": "LocalInterface[rns/test]",
+            "short_name": "rns/test",
+            "hash": "3" * 64,
+            "type": "LocalClientInterface",
+        }
+        state = LiveRNSProvider.normalize(
+            {"interfaces": [interface, dict(interface)]}, [], label="Test"
+        )
+
+        self.assertEqual(len(state["interfaces"]), 1)
+        self.assertEqual(len(state["edges"]), 1)
+
     def test_replaces_invalid_rns_short_names_only_for_display(self):
         status = {"interfaces": [
             {

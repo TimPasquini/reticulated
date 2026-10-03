@@ -154,16 +154,41 @@ class LiveReportRegistry:
             entry = self._reports.get(reporter_id)
             if entry is None:
                 return None
-            copied = json.loads(json.dumps(entry))
+            copied = dict(entry)
+            services_by_destination: dict[str, list[dict[str, Any]]] = {}
+            for report in self._reports.values():
+                service_reporter = report["reporter_id"]
+                for service in report["snapshot"].get("local_services", []):
+                    destination_hash = str(service.get("destination_hash") or "").lower()
+                    if destination_hash:
+                        services_by_destination.setdefault(destination_hash, []).append({
+                            **service, "reporter_id": service_reporter
+                        })
+        snapshot = dict(copied["snapshot"])
+        enriched_destinations = []
+        for destination in snapshot.get("destinations", []):
+            service_matches = services_by_destination.get(
+                str(destination.get("hash") or "").lower()
+            )
+            if service_matches:
+                destination = {
+                    **destination,
+                    "local_service": service_matches[0],
+                    "service_reporters": sorted({
+                        service["reporter_id"] for service in service_matches
+                    }),
+                }
+            enriched_destinations.append(destination)
+        snapshot["destinations"] = enriched_destinations
         state = topology_snapshot(
-            copied["snapshot"], include_paths=include_paths, include_rmap=include_rmap
+            snapshot, include_paths=include_paths, include_rmap=include_rmap
         )
         state["reporter"] = self._metadata(copied)
         return state
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
-            entries = json.loads(json.dumps(list(self._reports.values())))
+            entries = list(self._reports.values())
         result = [self._metadata(entry) for entry in entries]
         return sorted(result, key=lambda item: (not item["local"], item["label"].lower()))
 
@@ -188,7 +213,7 @@ class LiveReportRegistry:
     def correlations(self) -> list[dict[str, Any]]:
         """Correlate reporter roots with the same hashes observed as next hops."""
         with self._lock:
-            entries = json.loads(json.dumps(list(self._reports.values())))
+            entries = list(self._reports.values())
         roots: dict[str, list[str]] = {}
         observers: dict[str, list[str]] = {}
         for entry in entries:
@@ -216,7 +241,9 @@ class LiveReportRegistry:
     ) -> dict[str, Any] | None:
         """Merge reporter evidence without fabricating unobserved route segments."""
         with self._lock:
-            entries = json.loads(json.dumps(list(self._reports.values())))
+            # Updates atomically replace complete entries and never mutate an
+            # installed snapshot, so readers can safely retain references.
+            entries = list(self._reports.values())
         if not entries:
             return None
         entries.sort(key=lambda entry: (not entry["local"], entry["reporter_id"]))
@@ -235,6 +262,7 @@ class LiveReportRegistry:
         services_by_destination: dict[str, list[dict[str, Any]]] = {}
         edges: list[dict[str, Any]] = []
         destination_candidates: dict[str, tuple[tuple[Any, ...], dict[str, Any], dict[str, Any]]] = {}
+        path_summary_candidates: dict[str, tuple[tuple[Any, ...], str | None]] = {}
         reporter_metadata: list[dict[str, Any]] = []
         reporter_health: dict[str, dict[str, Any]] = {}
 
@@ -273,11 +301,22 @@ class LiveReportRegistry:
                 ))
 
             id_map = {root["id"]: root_id}
-            for interface in snapshot.get("interfaces", []):
+            snapshot_interfaces = snapshot.get("interfaces", [])
+            for interface in snapshot_interfaces:
                 original_id = interface["id"]
                 merged_id = f"reporter:{reporter_id}:{original_id}"
                 id_map[original_id] = merged_id
-                interfaces.append({**interface, "id": merged_id, "reporter_id": reporter_id})
+            for interface in snapshot_interfaces:
+                original_id = interface["id"]
+                interfaces.append({
+                    **interface,
+                    "id": id_map[original_id],
+                    "parent_interface_id": id_map.get(
+                        interface.get("parent_interface_id"),
+                        interface.get("parent_interface_id"),
+                    ),
+                    "reporter_id": reporter_id,
+                })
 
             for transport in snapshot.get("transports", []):
                 transport_hash = str(transport.get("hash"))
@@ -321,6 +360,18 @@ class LiveReportRegistry:
                         0 if entry["local"] else 1,
                         reporter_id,
                     )
+                    current_summary = path_summary_candidates.get(destination_hash)
+                    if current_summary is None or score < current_summary[0]:
+                        path_summary_candidates[destination_hash] = (
+                            score,
+                            str(destination.get("via")) if destination.get("via") else None,
+                        )
+                    if (
+                        not include_paths
+                        and not destination.get("local")
+                        and destination_hash.lower() not in services_by_destination
+                    ):
+                        continue
                     merged_destination_id = f"reporter:{reporter_id}:destination:{destination_hash}"
                     candidate_destination = {
                         **destination,
@@ -407,6 +458,15 @@ class LiveReportRegistry:
             "health": reporter_health,
             "correlations": self.correlations(),
         }
+        if not include_paths:
+            counts_by_transport: dict[str, int] = {}
+            for _, via in path_summary_candidates.values():
+                if via:
+                    counts_by_transport[via] = counts_by_transport.get(via, 0) + 1
+            merged["_path_summary"] = {
+                "destination_count": len(path_summary_candidates),
+                "by_transport": counts_by_transport,
+            }
         projected = topology_snapshot(
             merged, include_paths=include_paths, include_rmap=include_rmap
         )
