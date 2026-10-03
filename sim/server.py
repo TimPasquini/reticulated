@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import os
+import queue
 import time
 from contextlib import asynccontextmanager
 
@@ -15,12 +16,18 @@ from pydantic import BaseModel
 from . import config
 from .live_rns import LiveRNSProvider
 from .live_reports import LiveReportRegistry, validate_reporter_id
+from .live_layouts import LiveLayoutStore
 from .rns_reporting import RNSReportListener
 from .manager import Simulator
 
 sim = Simulator()
 live_rns = LiveRNSProvider()
-live_reports = LiveReportRegistry(stale_after=config.LIVE_REPORT_STALE_AFTER)
+live_reports = LiveReportRegistry(
+    stale_after=config.LIVE_REPORT_STALE_AFTER,
+    storage_path=config.LIVE_REPORT_CACHE_FILE,
+    cache_interval=config.LIVE_REPORT_CACHE_INTERVAL,
+)
+live_layouts = LiveLayoutStore(config.LIVE_LAYOUTS_FILE)
 clients = set()
 clients_lock = asyncio.Lock()
 rns_report_listener: RNSReportListener | None = None
@@ -101,6 +108,12 @@ class PositionsBody(BaseModel):
     links: dict = {}
 
 
+class LiveLayoutBody(BaseModel):
+    positions: dict = {}
+    pinned: list[str] = []
+    viewport: dict | None = None
+
+
 class DropBody(BaseModel):
     destination: str
 
@@ -126,9 +139,14 @@ async def broadcast(event):
 
 
 async def event_pump():
-    loop = asyncio.get_running_loop()
     while True:
-        event = await loop.run_in_executor(None, sim.events.get)
+        try:
+            # A permanently blocked Queue.get() keeps asyncio's default
+            # executor alive after Ctrl+C. The bounded wait lets cancellation
+            # complete promptly even when the simulator is idle.
+            event = await asyncio.to_thread(sim.events.get, True, 0.5)
+        except queue.Empty:
+            continue
         await broadcast(event)
 
 
@@ -165,16 +183,21 @@ async def lifespan(app):
         if service is not None:
             live_rns.register_local_service(service)
         print(f"Reticulated RNS ingest destination: {destination_hash}", flush=True)
-    pump = asyncio.create_task(event_pump())
-    poller = asyncio.create_task(status_pump())
-    live_poller = asyncio.create_task(live_rns_pump())
-    yield
-    pump.cancel()
-    poller.cancel()
-    live_poller.cancel()
-    if rns_report_listener is not None:
-        rns_report_listener.stop()
-    sim.shutdown()
+    tasks = [
+        asyncio.create_task(event_pump()),
+        asyncio.create_task(status_pump()),
+        asyncio.create_task(live_rns_pump()),
+    ]
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if rns_report_listener is not None:
+            rns_report_listener.stop()
+        await asyncio.to_thread(live_reports.flush)
+        await asyncio.to_thread(sim.shutdown)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -210,6 +233,10 @@ def get_live_reporters():
                 rns_report_listener.destination_hash if rns_report_listener else None
             ),
         },
+        "cache": {
+            "persistent": live_reports.storage_path is not None,
+            "error": live_reports.cache_error,
+        },
     }
 
 
@@ -221,6 +248,33 @@ def get_live_network(include_paths: bool = False, include_rmap: bool = False):
     if state is None:
         raise HTTPException(status_code=503, detail="no live reports collected yet")
     return state
+
+
+@app.get("/api/live/layouts")
+def get_live_layouts(scope: str = "all"):
+    try:
+        return {"layouts": live_layouts.list(scope)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/live/layouts/{scope}/{name}")
+def get_live_layout(scope: str, name: str):
+    try:
+        layout = live_layouts.get(scope, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if layout is None:
+        raise HTTPException(status_code=404, detail="live layout not found")
+    return layout
+
+
+@app.put("/api/live/layouts/{scope}/{name}")
+def put_live_layout(scope: str, name: str, body: LiveLayoutBody):
+    try:
+        return live_layouts.save(scope, name, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/live/reporters/{reporter_id}/state")

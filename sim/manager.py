@@ -46,6 +46,9 @@ class Simulator:
         )
         self.active = False
         self.lock = threading.Lock()
+        self._shutdown_event = threading.Event()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = False
         self.hub.start()
         self.push_all_params()
         supervisor = threading.Thread(target=self._messenger_supervisor)
@@ -59,7 +62,7 @@ class Simulator:
         self.events.put(event)
 
     def _messenger_supervisor(self):
-        while True:
+        while not self._shutdown_event.is_set():
             try:
                 if self.active:
                     node_ids = list(self.topology.nodes.keys())
@@ -72,7 +75,7 @@ class Simulator:
                             self.node_manager.stop_messenger(node_id)
             except Exception:
                 pass
-            time.sleep(1.5)
+            self._shutdown_event.wait(1.5)
 
     def emit(self, event):
         self.events.put(event)
@@ -743,5 +746,10 @@ class Simulator:
         return True
 
     def shutdown(self):
-        self.stop()
-        self.hub.stop()
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+            self._shutdown_event.set()
+            self.stop()
+            self.hub.stop()

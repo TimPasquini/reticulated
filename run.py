@@ -28,7 +28,12 @@ def main():
         "  Ctrl+C to stop",
     ]), flush=True)
 
-    uvicorn.run("sim.server:app", host=args.host, port=args.port, log_level="warning")
+    try:
+        uvicorn.run("sim.server:app", host=args.host, port=args.port, log_level="warning")
+    except KeyboardInterrupt:
+        # Uvicorn normally consumes SIGINT itself. If another interrupt lands
+        # during cleanup, still return to the shell without a traceback.
+        pass
 
 
 if __name__ == "__main__":

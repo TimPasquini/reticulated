@@ -130,6 +130,36 @@ class LiveRNSNormalizationTests(unittest.TestCase):
         self.assertEqual(len(state["interfaces"]), 1)
         self.assertTrue(state["interfaces"][0]["path_only"])
 
+    def test_i2p_peer_is_attached_to_its_reported_parent_interface(self):
+        parent_hash = "1" * 64
+        peer_hash = "2" * 64
+        parent_name = "I2PInterface[Patroon I2P]"
+        status = {"interfaces": [
+            {
+                "name": parent_name,
+                "short_name": "Patroon I2P",
+                "hash": parent_hash,
+                "type": "I2PInterface",
+            },
+            {
+                "name": "I2PInterfacePeer[Connected peer abc]",
+                "short_name": "Connected peer abc",
+                "hash": peer_hash,
+                "type": "I2PInterfacePeer",
+                "parent_interface_name": parent_name,
+                "parent_interface_hash": parent_hash,
+            },
+        ]}
+
+        state = LiveRNSProvider.normalize(status, [], label="Patroon")
+        peer = next(item for item in state["interfaces"] if item["interface_hash"] == peer_hash)
+        parent = next(item for item in state["interfaces"] if item["interface_hash"] == parent_hash)
+        peer_edge = next(edge for edge in state["edges"] if edge["target"] == peer["id"])
+
+        self.assertEqual(peer["parent_interface_id"], parent["id"])
+        self.assertEqual(peer_edge["source"], parent["id"])
+        self.assertEqual(peer_edge["kind"], "observed_peer_interface")
+
     def test_replaces_invalid_rns_short_names_only_for_display(self):
         status = {"interfaces": [
             {

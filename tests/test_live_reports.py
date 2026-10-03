@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from sim.live_reports import LiveReportRegistry, validate_reporter_id, validate_snapshot
 from sim.reporter import report_url
@@ -28,6 +30,23 @@ def snapshot(label, transport_id=None, observed=()):
 
 
 class LiveReportRegistryTests(unittest.TestCase):
+    def test_persists_complete_reports_for_immediate_restart_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reports.json"
+            registry = LiveReportRegistry(storage_path=str(path))
+            report = snapshot("Patroon", transport_id="patroon")
+            report["destinations"] = [{"hash": "destination", "hops": 3}]
+            report["rmap_interfaces"] = [{"transport_id": "rmap-node"}]
+            registry.update("patroon", report, received_at=100.0, local=True)
+            self.assertEqual(path.read_bytes()[:2], b"\x1f\x8b")
+
+            restored = LiveReportRegistry(storage_path=str(path))
+            cached = restored.get("patroon", include_paths=True, include_rmap=True)
+
+        self.assertEqual(cached["destinations"][0]["hash"], "destination")
+        self.assertEqual(cached["rmap_interfaces"][0]["transport_id"], "rmap-node")
+        self.assertTrue(restored.list()[0]["local"])
+
     def test_stores_independent_reports_and_projects_large_sections(self):
         registry = LiveReportRegistry(stale_after=90)
         report = snapshot("Fedora", observed=("patroon-hash",))

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import os
 import re
+import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from .live_rns import topology_snapshot
@@ -43,10 +47,21 @@ def validate_snapshot(snapshot: Any) -> dict[str, Any]:
 class LiveReportRegistry:
     """Keep the latest complete report for each stable reporter ID."""
 
-    def __init__(self, *, stale_after: float = 90.0) -> None:
+    def __init__(
+        self,
+        *,
+        stale_after: float = 90.0,
+        storage_path: str | None = None,
+        cache_interval: float = 0.0,
+    ) -> None:
         self.stale_after = stale_after
         self._lock = threading.Lock()
         self._reports: dict[str, dict[str, Any]] = {}
+        self.storage_path = Path(storage_path) if storage_path else None
+        self.cache_interval = max(0.0, cache_interval)
+        self._last_cache_write = 0.0
+        self.cache_error: str | None = None
+        self._load()
 
     def update(
         self,
@@ -66,6 +81,70 @@ class LiveReportRegistry:
         }
         with self._lock:
             self._reports[reporter_id] = entry
+            self._save_locked()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._save_locked(force=True)
+
+    def _load(self) -> None:
+        if self.storage_path is None or not self.storage_path.exists():
+            return
+        try:
+            raw = self.storage_path.read_bytes()
+            if raw.startswith(b"\x1f\x8b"):
+                raw = gzip.decompress(raw)
+            document = json.loads(raw)
+            entries = document.get("reports", [])
+            if not isinstance(entries, list):
+                raise ValueError("cached reports must be a list")
+            loaded = {}
+            for entry in entries:
+                reporter_id = validate_reporter_id(str(entry.get("reporter_id") or ""))
+                validate_snapshot(entry.get("snapshot"))
+                received_at = float(entry.get("received_at"))
+                loaded[reporter_id] = {
+                    "reporter_id": reporter_id,
+                    "received_at": received_at,
+                    "local": bool(entry.get("local")),
+                    "snapshot": entry["snapshot"],
+                }
+            self._reports = loaded
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            # A damaged cache must not prevent fresh observations from loading.
+            self.cache_error = str(exc)
+            self._reports = {}
+
+    def _save_locked(self, *, force: bool = False) -> None:
+        if self.storage_path is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_cache_write < self.cache_interval:
+            return
+        try:
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=self.storage_path.name + ".",
+                suffix=".tmp",
+                dir=self.storage_path.parent,
+            )
+            try:
+                encoded = json.dumps(
+                    {"version": 1, "reports": list(self._reports.values())},
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(gzip.compress(encoded, compresslevel=6))
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, self.storage_path)
+                self.cache_error = None
+                self._last_cache_write = now
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        except (OSError, TypeError, ValueError) as exc:
+            self.cache_error = str(exc)
 
     def get(
         self, reporter_id: str, *, include_paths: bool = False, include_rmap: bool = False

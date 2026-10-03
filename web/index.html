@@ -37,6 +37,10 @@
     <span id="live-health" class="live-only">Waiting for live data…</span>
     <button id="btn-live-rmap" class="live-only">Show RMAP metadata</button>
     <button id="btn-live-destinations" class="live-only">Show path summaries</button>
+    <button id="btn-live-pin" class="live-only" disabled>Pin node</button>
+    <button id="btn-live-save-layout" class="live-only">Save layout</button>
+    <select id="live-layout-select" class="live-only" title="Saved live layout"><option value="">Saved layouts</option></select>
+    <button id="btn-live-load-layout" class="live-only" disabled>Load layout</button>
     <button id="btn-reset" class="hold-btn sim-only" title="Hold 3 seconds to reset everything"><span>Hold to Reset</span></button>
   </div>
   <div id="main">
@@ -143,6 +147,6 @@
     </div>
   </div>
 </div>
-<script type="module" src="/app.js?v=18"></script>
+<script type="module" src="/app.js?v=19"></script>
 </body>
 </html>

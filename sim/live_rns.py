@@ -477,6 +477,7 @@ class LiveRNSProvider:
 
         interfaces: list[dict[str, Any]] = []
         interface_by_name: dict[str, dict[str, Any]] = {}
+        interface_by_hash: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
         for raw in status.get("interfaces", []):
             name = str(raw.get("name") or raw.get("short_name") or "Unnamed interface")
@@ -500,16 +501,39 @@ class LiveRNSProvider:
                 "remote_host": remote_host,
                 "remote_port": remote_port,
                 "i2p_b32": raw.get("i2p_b32"),
+                "parent_interface_name": raw.get("parent_interface_name"),
+                "parent_interface_hash": raw.get("parent_interface_hash"),
+                "parent_interface_id": None,
                 "path_only": False,
                 "raw": raw,
             }
             interfaces.append(item)
             interface_by_name[name] = item
+            if interface_hash:
+                interface_by_hash[str(interface_hash).lower()] = item
+
+        # Spawned peer interfaces are real interfaces, but RNS explicitly
+        # reports their owning parent. Preserve that hierarchy instead of
+        # incorrectly drawing every peer as a direct child of the instance.
+        for item in interfaces:
+            parent_hash = item.get("parent_interface_hash")
+            parent_name = item.get("parent_interface_name")
+            parent = None
+            if parent_hash:
+                parent = interface_by_hash.get(str(parent_hash).lower())
+            if parent is None and parent_name:
+                parent = interface_by_name.get(str(parent_name))
+            source_id = root_id
+            edge_kind = "observed_interface"
+            if parent is not None and parent["id"] != item["id"]:
+                item["parent_interface_id"] = parent["id"]
+                source_id = parent["id"]
+                edge_kind = "observed_peer_interface"
             edges.append({
-                "id": f"edge:{root_id}:{item['id']}",
-                "source": root_id,
+                "id": f"edge:{source_id}:{item['id']}",
+                "source": source_id,
                 "target": item["id"],
-                "kind": "observed_interface",
+                "kind": edge_kind,
                 "certainty": "observed",
             })
 

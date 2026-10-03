@@ -58,6 +58,11 @@ Optional live-mode settings are:
 - `LIVE_RNS_TIMEOUT`: per-command timeout in seconds (default `3`)
 - `LIVE_RNS_INTERVAL`: backend collection interval in seconds (default `5`)
 - `LIVE_RNS_REPORTER_ID`: stable ID for this server's local report
+- `LIVE_REPORT_CACHE_FILE`: persistent latest-report cache, including complete
+  path and RMAP data
+- `LIVE_REPORT_CACHE_INTERVAL`: minimum seconds between compressed cache writes
+  (default `300`; in-memory data still updates immediately)
+- `LIVE_LAYOUTS_FILE`: persistent named and autosaved live graph layouts
 
 Live paths show only what the local transport reports. Solid edges represent
 the local instance, its interfaces, and reported next-hop transports. Dashed
@@ -66,6 +71,15 @@ application never fabricates intermediate routers. If either command fails,
 the API reports the error and retains the last good data from that source.
 Normalized objects also retain their raw `rnstatus` or `rnpath` fields so newer
 RNS telemetry can be adopted without another collector redesign.
+
+Live graph nodes can be pinned from the toolbar or simply dragged into place;
+dragging pins the node automatically. Pinned nodes are fixed anchors for the
+fCoSE/CoSE layout sequence, while unpinned and newly discovered nodes remain
+free to arrange around them. Positions, pins, zoom, and pan are autosaved by
+stable graph node ID. Named layouts can also be saved and loaded per reporter
+view. The complete latest reporter snapshots are cached separately, so path
+summaries and RMAP metadata are available immediately after a restart while
+fresh background collection is still running.
 
 Zero-hop destinations learned through the shared `LocalInterface` are retained
 as local services even when path summaries are hidden. The reporter discovers
