@@ -158,6 +158,9 @@ class LiveReportRegistryTests(unittest.TestCase):
             network["rmap_matches"][0]["interface_id"],
             "reporter:patroon:interface:nyc",
         )
+        self.assertEqual(network["rmap_summary"]["attachment_count"], 1)
+        self.assertEqual(network["rmap_attachments"][0]["source"], "transport:patroon")
+        self.assertEqual(network["rmap_attachments"][0]["target"], "transport:nyc-transport")
 
     def test_discovered_service_names_matching_destination_across_reporters(self):
         destination_hash = "c" * 32

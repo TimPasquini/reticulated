@@ -98,6 +98,57 @@ def _rmap_matches(state: dict[str, Any]) -> list[dict[str, Any]]:
     return matches
 
 
+def _rmap_attachments(
+    state: dict[str, Any], matches: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Project endpoint matches into confirmed transport attachment edges."""
+    roots = state.get("reporter_roots") or [state.get("root", {})]
+    root_by_reporter = {root.get("reporter_id"): root for root in roots}
+    default_root = state.get("root", {})
+    interfaces = {
+        interface.get("id"): interface for interface in state.get("interfaces", [])
+    }
+    attachments = []
+    seen: set[tuple[str, str, str]] = set()
+    for match in matches:
+        if match.get("kind") not in {"remote_endpoint", "i2p_endpoint"}:
+            continue
+        interface = interfaces.get(match.get("interface_id"), {})
+        root = root_by_reporter.get(interface.get("reporter_id"), default_root)
+        remote_transport = match.get("transport_id")
+        local_transport = root.get("transport_id")
+        if not remote_transport or (
+            local_transport and str(remote_transport) == str(local_transport)
+        ):
+            continue
+        source_id = root.get("id")
+        target_id = f"transport:{remote_transport}"
+        if not source_id:
+            continue
+        key = (str(source_id), target_id, str(match.get("interface_id")))
+        if key in seen:
+            continue
+        seen.add(key)
+        attachments.append({
+            "id": "rmap-attachment:" + ":".join(key),
+            "source": source_id,
+            "target": target_id,
+            "via_interface_id": match.get("interface_id"),
+            "local_transport_id": local_transport,
+            "remote_transport_id": remote_transport,
+            "match_kind": match.get("kind"),
+            "interface_online": interface.get("status"),
+            "certainty": (
+                "observed_endpoint_attachment"
+                if interface.get("status") is True
+                else "configured_endpoint_attachment"
+            ),
+            "latitude": match.get("latitude"),
+            "longitude": match.get("longitude"),
+        })
+    return attachments
+
+
 def topology_snapshot(
     source: dict[str, Any], *, include_paths: bool = False, include_rmap: bool = False
 ) -> dict[str, Any]:
@@ -134,9 +185,11 @@ def topology_snapshot(
         ),
     }
     state["rmap_matches"] = _rmap_matches(state)
+    state["rmap_attachments"] = _rmap_attachments(state, state["rmap_matches"])
     state["rmap_summary"]["matched_interface_count"] = len(
         {match["interface_id"] for match in state["rmap_matches"]}
     )
+    state["rmap_summary"]["attachment_count"] = len(state["rmap_attachments"])
     if not include_paths:
         local_destination_ids = {
             item["id"] for item in service_destinations if item.get("id")
@@ -149,6 +202,7 @@ def topology_snapshot(
     if not include_rmap:
         state["rmap_interfaces"] = []
         state["rmap_matches"] = []
+        state["rmap_attachments"] = []
     return state
 
 

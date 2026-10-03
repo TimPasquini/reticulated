@@ -226,6 +226,10 @@ const cy = cytoscape({
       "label": "", "font-size": 9, "color": "#9fdbde", "text-background-color": "#11151c", "text-background-opacity": 0.85,
       "text-background-padding": 2, "curve-style": "bezier",
     }},
+    { selector: "edge.live-attachment", style: {
+      "line-color": "#56b9bd", "line-style": "solid", "width": 3,
+      "target-arrow-shape": "triangle", "target-arrow-color": "#56b9bd", "arrow-scale": 0.8,
+    }},
     { selector: "edge.live-discovered:selected", style: { "label": "data(label)" }},
     { selector: "edge.announce-flash", style: { "line-color": "#ffd34d", "width": 5 }},
     { selector: "edge.route", style: { "line-color": "#ff9d3c", "width": 5 }},
@@ -494,7 +498,9 @@ function rebuildLive(snapshot) {
   const renderModel = liveRenderModel(snapshot);
   const positions = livePositions(snapshot, renderModel);
   Object.keys(oldPositions).forEach((id) => {
-    if (positions[id]) positions[id] = oldPositions[id];
+    // Preserve every surviving node, including enrichment nodes that are not
+    // part of the base RNS position model.
+    positions[id] = oldPositions[id];
   });
   cy.elements().remove();
   const els = [];
@@ -531,20 +537,30 @@ function rebuildLive(snapshot) {
   }
   const existingNodeIds = new Set(els.filter((element) => element.group === "nodes").map((element) => element.data.id));
   const existingObservedPairs = new Set(renderModel.edges.map((edge) => edge.source + "|" + edge.target));
+  const attachmentByPair = new Map((snapshot.rmap_attachments || []).map((attachment) =>
+    [attachment.via_interface_id + "|" + attachment.target, attachment]
+  ));
+  const rmapSlots = new Map();
   for (const match of snapshot.rmap_matches || []) {
     if (match.kind === "local_publication" || !match.transport_id) continue;
     const transportId = "transport:" + match.transport_id;
     if (transportId === match.interface_id || rootIds.has(transportId)) continue;
     if (!existingNodeIds.has(transportId)) {
       const interfacePosition = positions[match.interface_id] || { x: 0, y: 170 };
-      positions[transportId] = positions[transportId] || { x: interfacePosition.x, y: interfacePosition.y + 160 };
+      const slot = rmapSlots.get(match.interface_id) || 0;
+      rmapSlots.set(match.interface_id, slot + 1);
+      const direction = slot % 2 === 0 ? 1 : -1;
+      const offset = slot === 0 ? 0 : direction * Math.ceil(slot / 2) * 150;
+      positions[transportId] = positions[transportId] || { x: interfacePosition.x + offset, y: interfacePosition.y + 160 };
       const transportItem = { id: transportId, hash: match.transport_id, rmap: true, rmap_records: [match.record] };
       els.push({ group: "nodes", data: { id: transportId, label: "RMAP node\n" + (match.name || shortHash(match.transport_id)), liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport", position: positions[transportId] });
       existingNodeIds.add(transportId);
     }
     const pair = match.interface_id + "|" + transportId;
     if (!existingObservedPairs.has(pair)) {
-      els.push({ group: "edges", data: { id: "edge:rmap-match:" + match.interface_id + ":" + match.rmap_interface_id, source: match.interface_id, target: transportId, label: "RMAP endpoint match", liveKind: "edge", item: { kind: "rmap_endpoint_match", certainty: "advertised", match: match } }, classes: "live-discovered" });
+      const attachment = attachmentByPair.get(pair);
+      const classes = attachment && attachment.interface_online === true ? "live-attachment" : "live-discovered";
+      els.push({ group: "edges", data: { id: "edge:rmap-match:" + match.interface_id + ":" + match.rmap_interface_id, source: match.interface_id, target: transportId, label: "Known one-hop attachment", liveKind: "edge", item: { kind: "rmap_endpoint_attachment", certainty: attachment ? attachment.certainty : "advertised", match: match, attachment: attachment } }, classes: classes });
       existingObservedPairs.add(pair);
     }
   }
@@ -583,7 +599,10 @@ function rebuildLive(snapshot) {
   if (restoredSelection) showPanel(restoredSelection);
   if (shouldAutoLayout) {
     state.liveLayoutPending = false;
-    requestAnimationFrame(() => cy.fit(cy.elements(), 60));
+    // Run the same detangle/refine pipeline after a reporter, RMAP or path
+    // enrichment changes the graph structure. Ordinary polling does not set
+    // this flag, so user positions and viewport remain stable between polls.
+    requestAnimationFrame(() => runLiveLayout(false));
   }
 }
 

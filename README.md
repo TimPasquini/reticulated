@@ -118,6 +118,13 @@ node's own published RNode or I2P interface is matched by transport identity
 and interface type. Thus an RMAP cache contributed by Fedora can annotate
 Patroon's interfaces even when Patroon has received no discovery records of
 its own. The UI reports **RMAP records** and **interface matches** separately.
+An active local client interface whose endpoint matches an advertised RMAP
+interface also becomes a confirmed one-hop **attachment** between transport
+nodes. These attachment edges form a structural graph suitable for shortest
+known-attachment paths; they are not assertions about the route Reticulum will
+choose for a packet. Future geographic rendering can place RMAP transports with
+real coordinates on the map and cluster unlocated nodes near their closest
+confirmed anchor in screen space without inventing coordinates.
 
 The default **All reporters** view draws one evidence graph. The server's local
 report is primary, transport identities shared between reports become the same
