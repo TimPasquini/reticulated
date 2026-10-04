@@ -173,6 +173,48 @@ class LiveReportRegistryTests(unittest.TestCase):
         )
         self.assertEqual(len(network["announces"]["events"][0]["observations"]), 2)
 
+    def test_announce_route_connects_reporter_to_known_transport_root(self):
+        patroon = snapshot("Patroon", transport_id="patroon-hash")
+        fedora = snapshot("Fedora")
+        fedora["interfaces"] = [{"id": "interface:lan", "name": "Garage LAN"}]
+        fedora["edges"] = [{
+            "id": "edge:root:lan",
+            "source": fedora["root"]["id"],
+            "target": "interface:lan",
+            "kind": "observed_interface",
+        }]
+        fedora["announces"] = {
+            "active": True,
+            "events": [{
+                "id": "packet-a",
+                "received_at": 100.0,
+                "destination_hash": "d" * 32,
+                "identity_hash": "i" * 32,
+                "aspect": "lxmf.delivery",
+                "route_hops": 2,
+                "route_via": "patroon-hash",
+                "route_interface": "Garage LAN",
+            }],
+        }
+
+        registry = LiveReportRegistry()
+        registry.update("patroon", patroon, local=True)
+        registry.update("fedora", fedora)
+        network = registry.network()
+
+        destination = next(item for item in network["destinations"] if item["announced"])
+        path_edge = next(
+            edge for edge in network["edges"] if edge.get("evidence") == "received_announce"
+        )
+        self.assertEqual(path_edge["source"], "transport:patroon-hash")
+        self.assertEqual(path_edge["target"], destination["id"])
+        self.assertEqual(path_edge["unknown_hops"], 1)
+        historical_edge = next(
+            edge for edge in network["edges"] if edge["kind"] == "announce_next_hop"
+        )
+        self.assertEqual(historical_edge["target"], "transport:patroon-hash")
+        self.assertEqual(historical_edge["reporter_id"], "fedora")
+
     def test_network_unifies_reporter_roots_and_keeps_closest_path_observation(self):
         fedora = snapshot("Fedora", observed=("patroon-hash",))
         fedora["interfaces"] = [

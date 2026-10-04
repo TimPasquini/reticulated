@@ -370,9 +370,55 @@ class LiveRNSCollectionTests(unittest.TestCase):
         self.assertEqual(event["route_interface"], "BackboneInterface[NYC Backbone]")
         compact = topology_snapshot(state)
         self.assertEqual(compact["announce_summary"]["event_count"], 1)
+        self.assertEqual(compact["announce_summary"]["enriched_destination_count"], 1)
         self.assertNotIn("events", compact["announces"])
+        self.assertEqual(len(compact["destinations"]), 1)
+        self.assertTrue(compact["destinations"][0]["announced"])
+        self.assertEqual(compact["destinations"][0]["hash"], "destination-a")
+        self.assertTrue(any(
+            edge["kind"] == "known_path"
+            and edge["target"] == compact["destinations"][0]["id"]
+            for edge in compact["edges"]
+        ))
         full = topology_snapshot(state, include_announces=True)
         self.assertEqual(full["announces"]["events"][0]["id"], "packet-a")
+
+    def test_announce_route_creates_historical_next_hop_when_path_expired(self):
+        state = LiveRNSProvider.normalize(STATUS, [], label="Patroon")
+        state["announces"] = {
+            "active": True,
+            "events": [{
+                "id": "packet-a",
+                "destination_hash": "destination-a",
+                "identity_hash": "identity-a",
+                "aspect": "lxmf.delivery",
+                "received_at": 100.0,
+                "route_hops": 3,
+                "route_via": "transport-x",
+                "route_interface": "BackboneInterface[NYC Backbone]",
+            }],
+        }
+
+        compact = topology_snapshot(state)
+
+        destination = compact["destinations"][0]
+        self.assertEqual(destination["id"], "announce-destination:destination-a")
+        self.assertEqual(destination["announce_aspect"], "lxmf.delivery")
+        inferred_transport = next(
+            item for item in compact["transports"] if item["hash"] == "transport-x"
+        )
+        self.assertTrue(inferred_transport["announce_inferred"])
+        next_hop_edge = next(
+            edge for edge in compact["edges"]
+            if edge["kind"] == "announce_next_hop"
+        )
+        self.assertEqual(next_hop_edge["source"], "interface:aabbccdd")
+        path_edge = next(
+            edge for edge in compact["edges"] if edge["kind"] == "known_path"
+        )
+        self.assertEqual(path_edge["source"], "transport:transport-x")
+        self.assertEqual(path_edge["unknown_hops"], 2)
+        self.assertEqual(path_edge["evidence"], "received_announce")
 
     def test_zero_hop_local_path_does_not_create_a_transport(self):
         destination_hash = "c" * 32

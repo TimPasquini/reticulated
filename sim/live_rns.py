@@ -150,6 +150,187 @@ def _rmap_attachments(
     return attachments
 
 
+def _announce_graph_enrichment(
+    state: dict[str, Any], announce_events: list[dict[str, Any]]
+) -> None:
+    """Project received announces into bounded, evidence-backed graph objects."""
+    destinations = [dict(item) for item in state.get("destinations", [])]
+    transports = [
+        {**item, "interface_ids": list(item.get("interface_ids", []))}
+        for item in state.get("transports", [])
+    ]
+    edges = [dict(item) for item in state.get("edges", [])]
+    state["destinations"] = destinations
+    state["transports"] = transports
+    state["edges"] = edges
+
+    roots = state.get("reporter_roots") or [state.get("root", {})]
+    root_by_reporter = {
+        root.get("reporter_id"): root for root in roots if root.get("reporter_id")
+    }
+    default_root = state.get("root", {})
+    interfaces = state.get("interfaces", [])
+    destinations_by_hash = {
+        str(item.get("hash") or "").lower(): item
+        for item in destinations if item.get("hash")
+    }
+    transports_by_id = {item.get("id"): item for item in transports}
+    root_ids = {root.get("id") for root in roots}
+    edge_pairs = {(edge.get("source"), edge.get("target")) for edge in edges}
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in announce_events:
+        if not isinstance(event, dict):
+            continue
+        destination_hash = str(event.get("destination_hash") or "").lower()
+        if destination_hash:
+            grouped.setdefault(destination_hash, []).append(event)
+
+    def observations(event: dict[str, Any]) -> list[dict[str, Any]]:
+        recorded = event.get("observations")
+        if isinstance(recorded, list) and recorded:
+            return [
+                {**event, **item} for item in recorded if isinstance(item, dict)
+            ]
+        return [event]
+
+    def received_at(item: dict[str, Any]) -> float:
+        try:
+            return float(item.get("received_at") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def matching_interface(
+        reporter_id: str | None, interface_name: Any
+    ) -> dict[str, Any] | None:
+        if not interface_name:
+            return None
+        wanted = str(interface_name)
+        for interface in interfaces:
+            candidates = interface.get("observations")
+            if not isinstance(candidates, list) or not candidates:
+                candidates = [interface]
+            for candidate in candidates:
+                if reporter_id and candidate.get("reporter_id") != reporter_id:
+                    continue
+                names = {
+                    str(candidate.get(key))
+                    for key in ("name", "short_name", "display_name")
+                    if candidate.get(key)
+                }
+                if wanted in names:
+                    return interface
+        return None
+
+    for destination_hash, events in grouped.items():
+        all_observations = [item for event in events for item in observations(event)]
+        route = min(
+            all_observations,
+            key=lambda item: (
+                _as_int(item.get("route_hops")) is None,
+                _as_int(item.get("route_hops")) or 0,
+                -received_at(item),
+            ),
+        )
+        latest = max(events, key=received_at)
+        observed_by_values = []
+        for event in events:
+            event_reporters = event.get("observed_by")
+            if isinstance(event_reporters, list):
+                observed_by_values.extend(event_reporters)
+            observed_by_values.extend(
+                item.get("reporter_id") for item in observations(event)
+            )
+        observed_by = sorted({
+            str(reporter_id) for reporter_id in observed_by_values if reporter_id
+        })
+        aspects = sorted({
+            str(event.get("aspect")) for event in events if event.get("aspect")
+        })
+        destination = destinations_by_hash.get(destination_hash)
+        hops = _as_int(route.get("route_hops"))
+        via = route.get("route_via")
+        if via and str(via).lower() == destination_hash:
+            via = None
+        reporter_id = route.get("reporter_id")
+        interface = matching_interface(reporter_id, route.get("route_interface"))
+        root = root_by_reporter.get(reporter_id, default_root)
+
+        if destination is None:
+            destination = {
+                "id": f"announce-destination:{destination_hash}",
+                "hash": destination_hash,
+                "hops": hops,
+                "via": via,
+                "interface_id": interface.get("id") if interface else None,
+                "interface": route.get("route_interface"),
+                "local": False,
+                "reporter_id": reporter_id,
+            }
+            destinations.append(destination)
+            destinations_by_hash[destination_hash] = destination
+
+        destination.update({
+            "announced": True,
+            "announce_count": len(events),
+            "announce_received_at": received_at(latest),
+            "announce_aspect": latest.get("aspect"),
+            "announce_aspects": aspects,
+            "announce_identity_hash": latest.get("identity_hash"),
+            "announce_app_data": latest.get("app_data_text"),
+            "announce_observed_by": observed_by,
+        })
+
+        if any(edge.get("target") == destination["id"] for edge in edges):
+            continue
+        source_id = interface.get("id") if interface else root.get("id")
+        if via:
+            transport_id = f"transport:{via}"
+            transport = transports_by_id.get(transport_id)
+            if transport is None and transport_id not in root_ids:
+                transport = {
+                    "id": transport_id,
+                    "hash": via,
+                    "interface_ids": [interface["id"]] if interface else [],
+                    "observed_by": [reporter_id] if reporter_id else [],
+                    "announce_inferred": True,
+                }
+                transports.append(transport)
+                transports_by_id[transport_id] = transport
+            elif (
+                transport is not None
+                and interface
+                and interface["id"] not in transport["interface_ids"]
+            ):
+                transport["interface_ids"].append(interface["id"])
+            if interface and (interface["id"], transport_id) not in edge_pairs:
+                edges.append({
+                    "id": f"edge:announce-next-hop:{interface['id']}:{via}",
+                    "source": interface["id"],
+                    "target": transport_id,
+                    "kind": "announce_next_hop",
+                    "certainty": "historical_observation",
+                    "reporter_id": reporter_id,
+                })
+                edge_pairs.add((interface["id"], transport_id))
+            source_id = transport_id
+        if not source_id:
+            continue
+        unknown_hops = max(0, hops - 1) if hops is not None else None
+        edges.append({
+            "id": f"edge:announce-path:{source_id}:{destination_hash}",
+            "source": source_id,
+            "target": destination["id"],
+            "kind": "known_path",
+            "certainty": "incomplete" if unknown_hops or hops is None else "observed",
+            "evidence": "received_announce",
+            "hops": hops,
+            "unknown_hops": unknown_hops,
+            "reporter_id": reporter_id,
+        })
+        edge_pairs.add((source_id, destination["id"]))
+
+
 def topology_snapshot(
     source: dict[str, Any], *, include_paths: bool = False, include_rmap: bool = False,
     include_announces: bool = False,
@@ -202,6 +383,7 @@ def topology_snapshot(
     announce_events = announce_capture.get("events", [])
     if not isinstance(announce_events, list):
         announce_events = []
+    _announce_graph_enrichment(state, announce_events)
     aspect_counts: dict[str, int] = {}
     for event in announce_events:
         if not isinstance(event, dict):
@@ -218,19 +400,27 @@ def topology_snapshot(
         "evicted_count": int(announce_capture.get("evicted_count") or 0),
         "aspect_counts": aspect_counts,
         "error": announce_capture.get("error"),
+        "enriched_destination_count": len([
+            item for item in state["destinations"] if item.get("announced")
+        ]),
     }
     if not include_announces:
         state["announces"] = {
             key: value for key, value in announce_capture.items() if key != "events"
         }
     if not include_paths:
-        local_destination_ids = {
-            item["id"] for item in service_destinations if item.get("id")
+        visible_destinations = [
+            item for item in state["destinations"]
+            if item.get("local") or item.get("local_service") or item.get("announced")
+        ]
+        visible_destination_ids = {
+            item["id"] for item in visible_destinations if item.get("id")
         }
-        state["destinations"] = service_destinations
+        state["destinations"] = visible_destinations
         state["edges"] = [
             edge for edge in state.get("edges", [])
-            if edge.get("kind") != "known_path" or edge.get("target") in local_destination_ids
+            if edge.get("kind") != "known_path"
+            or edge.get("target") in visible_destination_ids
         ]
     if not include_rmap:
         state["rmap_interfaces"] = []

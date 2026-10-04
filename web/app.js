@@ -184,6 +184,9 @@ const cy = cytoscape({
       "font-size": 9, "text-wrap": "wrap", "text-max-width": 100, "text-outline-color": "#11151c", "text-outline-width": 2,
     }},
     { selector: "node.live-transport.rmap-matched", style: { "border-width": 3, "border-color": "#56b9bd" }},
+    { selector: "node.live-transport.announce-inferred", style: {
+      "border-width": 3, "border-style": "dashed", "border-color": "#e4b84a",
+    }},
     { selector: "node.live-rmap-transport", style: {
       "shape": "hexagon", "width": 54, "height": 54, "background-color": "#245f64",
       "label": "data(label)", "color": "#dffcff", "text-valign": "center", "text-halign": "center",
@@ -209,6 +212,11 @@ const cy = cytoscape({
       "background-color": "#62478a", "border-color": "#b58be8", "border-width": 3,
       "color": "#fff", "font-size": 10, "text-max-width": 106,
       "text-valign": "center", "text-halign": "center", "text-margin-y": 0,
+    }},
+    { selector: "node.live-destination.announced", style: {
+      "shape": "ellipse", "width": 48, "height": 48,
+      "background-color": "#705724", "border-color": "#e4b84a", "border-width": 3,
+      "color": "#fff0bd", "text-max-width": 120,
     }},
     { selector: "node.live-destination-group", style: {
       "shape": "round-rectangle", "width": 130, "height": 48, "background-color": "#6d542a",
@@ -243,6 +251,10 @@ const cy = cytoscape({
     { selector: "edge.live-attachment", style: {
       "line-color": "#56b9bd", "line-style": "solid", "width": 3,
       "target-arrow-shape": "triangle", "target-arrow-color": "#56b9bd", "arrow-scale": 0.8,
+    }},
+    { selector: "edge.live-historical", style: {
+      "line-color": "#e4b84a", "line-style": "dotted",
+      "target-arrow-shape": "triangle", "target-arrow-color": "#e4b84a",
     }},
     { selector: "edge.live-discovered:selected", style: { "label": "data(label)" }},
     { selector: "edge.announce-flash", style: { "line-color": "#ffd34d", "width": 5 }},
@@ -328,6 +340,11 @@ function liveRenderModel(snapshot) {
     if (!destination) continue;
     if (destination.local || destination.local_service) {
       destinationNodes.push({ kind: "local_service", item: destination });
+      pathEdges.push(edge);
+      continue;
+    }
+    if (destination.announced) {
+      destinationNodes.push({ kind: "announced_destination", item: destination });
       pathEdges.push(edge);
       continue;
     }
@@ -866,7 +883,8 @@ function rebuildLive(snapshot) {
     const rmapRecords = renderModel.rmapMatches[item.id] || [];
     const rmapLabel = rmapRecords.length ? "\nRMAP: " + (rmapRecords[0].name || rmapRecords[0].type || "matched") : "";
     const transportItem = { ...item, rmap_records: rmapRecords };
-    els.push({ group: "nodes", data: { id: item.id, label: "next hop\n" + shortHash(item.hash) + rmapLabel + countLabel, liveKind: "transport", item: transportItem }, classes: "live-transport" + (rmapRecords.length ? " rmap-matched" : ""), position: positions[item.id] });
+    const announceLabel = item.announce_inferred ? "announce next hop\n" : "next hop\n";
+    els.push({ group: "nodes", data: { id: item.id, label: announceLabel + shortHash(item.hash) + rmapLabel + countLabel, liveKind: "transport", item: transportItem }, classes: "live-transport" + (rmapRecords.length ? " rmap-matched" : "") + (item.announce_inferred ? " announce-inferred" : ""), position: positions[item.id] });
   }
   const existingNodeIds = new Set(els.filter((element) => element.group === "nodes").map((element) => element.data.id));
   const existingObservedPairs = new Set(renderModel.edges.map((edge) => edge.source + "|" + edge.target));
@@ -905,6 +923,10 @@ function rebuildLive(snapshot) {
       const service = item.local_service;
       const label = service ? service.name + "\n" + service.type : "Local service\n" + shortHash(item.hash);
       els.push({ group: "nodes", data: { id: item.id, label: label, liveKind: "destination", item: item }, classes: "live-destination local-service", position: positions[item.id] });
+    } else if (entry.kind === "announced_destination") {
+      const aspect = item.announce_aspect || "unclassified announce";
+      const hops = item.hops === null || item.hops === undefined ? "unknown route" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
+      els.push({ group: "nodes", data: { id: item.id, label: aspect + "\n" + shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination announced", position: positions[item.id] });
     } else {
       const hops = item.hops === null || item.hops === undefined ? "? hops" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
       els.push({ group: "nodes", data: { id: item.id, label: shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination", position: positions[item.id] });
@@ -912,10 +934,11 @@ function rebuildLive(snapshot) {
   }
   for (const edge of renderModel.edges) {
     const incomplete = edge.certainty === "incomplete";
+    const historical = edge.certainty === "historical_observation";
     els.push({
       group: "edges",
       data: { id: edge.id, source: edge.source, target: edge.target, label: liveEdgeLabel(edge), liveKind: "edge", item: edge },
-      classes: (incomplete ? "live-incomplete" : "live-observed") + (edge.kind === "known_path" ? liveHopClass(edge.hops, edge.hop_tier) : ""),
+      classes: (incomplete ? "live-incomplete" : (historical ? "live-historical" : "live-observed")) + (edge.kind === "known_path" ? liveHopClass(edge.hops, edge.hop_tier) : ""),
     });
   }
   cy.add(els);
@@ -1087,7 +1110,9 @@ function showLivePanel(el) {
     title.textContent = "Observed next-hop transport";
     body.innerHTML = row("Transport hash", item.hash) + row("Observed by", (item.observed_by || []).join(", ")) + row("Interface IDs", (item.interface_ids || []).join(", ")) +
       row("Known destinations", knownDestinationCount) + row("Hop distribution", distribution || "load path summaries to inspect") +
-      '<div class="muted">The local path table supports this as a next hop. It does not reveal routers beyond it.</div>' + rmapDetails;
+      (item.announce_inferred
+        ? '<div class="muted">A received announce recorded this as the next transport at capture time. The dotted attachment is historical evidence, not a claim that the path is still current.</div>'
+        : '<div class="muted">The local path table supports this as a next hop. It does not reveal routers beyond it.</div>') + rmapDetails;
   } else if (kind === "rmap_transport") {
     title.textContent = "RMAP-discovered transport";
     body.innerHTML = row("Transport hash", item.hash) + row("Announced hops", item.hops) +
@@ -1121,7 +1146,10 @@ function showLivePanel(el) {
     const remaining = item.hops === null || item.hops === undefined ? "unknown" : Math.max(0, item.hops - (item.via ? 1 : 0));
     body.innerHTML = (service ? row("Service type", service.type) + row("Hosted by", service.reporter_id || item.reporter_label || item.reporter_id) : "") +
       row("Destination hash", item.hash) + row("Local", item.local === true) + row("Total hops", item.hops) + row("Next transport", item.via) +
-      row("Unknown remaining hops", remaining) + row("Interface", item.interface) + row("Expires", item.expires);
+      row("Unknown remaining hops", remaining) + row("Interface", item.interface) + row("Expires", item.expires) +
+      (item.announced ? row("Announce aspect", item.announce_aspect) + row("Announces captured", item.announce_count) +
+        row("Observed by", (item.announce_observed_by || []).join(", ")) + row("Last announced", item.announce_received_at) +
+        '<div class="muted">This node is backed by a received announce. Dashed route segments preserve unknown intermediate hops.</div>' : "");
   }
 }
 
