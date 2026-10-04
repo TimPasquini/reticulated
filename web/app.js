@@ -49,6 +49,7 @@ const state = {
   liveMapSignature: null,
   liveLayoutPending: true,
   liveLayoutRunning: false,
+  liveLoadInFlight: false,
   liveGraphSignature: null,
   liveSlots: {},
   liveNextSlot: {},
@@ -1092,6 +1093,24 @@ function rebuildLive(snapshot) {
   }
   cy.add(els);
   state.liveGraphSignature = graphSignature;
+  if (state.liveSavedLayout && state.liveSavedLayout.positions) {
+    const activeIds = new Set(cy.nodes("[liveKind]").map((node) => node.id()));
+    const prunedPositions = {};
+    Object.entries(state.liveSavedLayout.positions).forEach(([id, position]) => {
+      if (activeIds.has(id)) prunedPositions[id] = position;
+    });
+    const prunedPins = (state.liveSavedLayout.pinned || []).filter((id) => activeIds.has(id));
+    if (Object.keys(prunedPositions).length !== Object.keys(state.liveSavedLayout.positions).length ||
+        prunedPins.length !== (state.liveSavedLayout.pinned || []).length) {
+      state.liveSavedLayout = {
+        ...state.liveSavedLayout,
+        positions: prunedPositions,
+        pinned: prunedPins,
+      };
+      state.livePinned = new Set(prunedPins);
+      scheduleLiveAutosave();
+    }
+  }
   applyLivePins();
   const hasSavedPositions = Object.keys(savedPositions).length > 0;
   // Newly received announces must not launch the force solver every poll.
@@ -1136,17 +1155,21 @@ function updateLiveHealth(snapshot) {
     const rmapCount = (snapshot.rmap_summary || {}).record_count || 0;
     const rmapMatched = (snapshot.rmap_summary || {}).matched_interface_count || 0;
     const announceCount = (snapshot.announce_summary || {}).event_count || 0;
+    const announceMapped = (snapshot.announce_summary || {}).enriched_destination_count || 0;
+    const announceSuppressed = (snapshot.announce_summary || {}).suppressed_destination_count || 0;
     health.textContent = (snapshot.interfaces || []).length + " interfaces · " +
       (snapshot.transports || []).length + " next hops · " +
       destinationCount + " known paths · " + rmapCount + " RMAP records · " +
-      announceCount + " captured announces · " + rmapMatched +
+      announceCount + " captured announces · " + announceMapped + " mapped" +
+      (announceSuppressed ? " (" + announceSuppressed + " retained off-graph)" : "") + " · " + rmapMatched +
       " interface matches · received " + Math.round(reporter.age_seconds || 0) + "s ago";
   }
 }
 
 async function loadLiveState() {
   if (state.uiMode !== "live") return;
-  if (state.liveLayoutRunning) return;
+  if (state.liveLayoutRunning || state.liveLoadInFlight) return;
+  state.liveLoadInFlight = true;
   try {
     await refreshLiveReporters();
     if (!state.liveReporterId) return;
@@ -1165,6 +1188,8 @@ async function loadLiveState() {
     const health = document.getElementById("live-health");
     health.textContent = "Live API unavailable";
     health.classList.add("error");
+  } finally {
+    state.liveLoadInFlight = false;
   }
 }
 

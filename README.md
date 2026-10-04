@@ -74,6 +74,9 @@ Optional live-mode settings are:
   existing shared RNS instance (default `true`)
 - `LIVE_ANNOUNCE_MAX_EVENTS`: bounded per-reporter in-memory event buffer
   (default `2048`)
+- `LIVE_ANNOUNCE_GRAPH_MAX_DESTINATIONS`: maximum announce destinations
+  projected into the interactive graph (default `250`; all events remain in
+  the durable history and reporter buffers)
 - `LIVE_ANNOUNCE_APP_DATA_PREVIEW`: maximum app-data preview bytes retained per
   event (default `512`; full payload length and SHA-256 are still recorded)
 - `LIVE_ANNOUNCE_DB_FILE`: durable, deduplicated announce history database

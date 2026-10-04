@@ -39,6 +39,9 @@ LIVE_ANNOUNCE_CAPTURE_ENABLED = os.environ.get(
     "LIVE_ANNOUNCE_CAPTURE_ENABLED", "true"
 ).lower() in ("1", "true", "yes", "on")
 LIVE_ANNOUNCE_MAX_EVENTS = int(os.environ.get("LIVE_ANNOUNCE_MAX_EVENTS", "2048"))
+LIVE_ANNOUNCE_GRAPH_MAX_DESTINATIONS = int(
+    os.environ.get("LIVE_ANNOUNCE_GRAPH_MAX_DESTINATIONS", "250")
+)
 LIVE_ANNOUNCE_APP_DATA_PREVIEW = int(
     os.environ.get("LIVE_ANNOUNCE_APP_DATA_PREVIEW", "512")
 )

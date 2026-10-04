@@ -151,9 +151,15 @@ def _rmap_attachments(
 
 
 def _announce_graph_enrichment(
-    state: dict[str, Any], announce_events: list[dict[str, Any]]
-) -> None:
-    """Project received announces into bounded, evidence-backed graph objects."""
+    state: dict[str, Any], announce_events: list[dict[str, Any]],
+    *, max_destinations: int | None = None,
+) -> dict[str, int]:
+    """Project the strongest announce evidence into a bounded live graph.
+
+    The durable announce store and each reporter's bounded event buffer retain
+    all observations. This limit applies only to Cytoscape-facing graph objects
+    so a long-running tab cannot grow by thousands of nodes per reporter.
+    """
     destinations = [dict(item) for item in state.get("destinations", [])]
     transports = [
         {**item, "interface_ids": list(item.get("interface_ids", []))}
@@ -239,7 +245,32 @@ def _announce_graph_enrichment(
                 return matched
         return interface_by_name.get(wanted)
 
-    for destination_hash, events in grouped.items():
+    def group_priority(item: tuple[str, list[dict[str, Any]]]) -> tuple[Any, ...]:
+        destination_hash, events = item
+        all_observations = [
+            observation for event in events for observation in observations(event)
+        ]
+        reporters = {
+            str(observation.get("reporter_id"))
+            for observation in all_observations if observation.get("reporter_id")
+        }
+        known_hops = [
+            hops for observation in all_observations
+            if (hops := _as_int(observation.get("route_hops"))) is not None
+        ]
+        newest = max((received_at(event) for event in events), default=0.0)
+        # Cross-reporter corroboration and short routes add the most structural
+        # evidence. Recency breaks ties while the hash makes ordering stable.
+        return (-len(reporters), min(known_hops, default=1_000_000), -newest, destination_hash)
+
+    selected_groups = sorted(grouped.items(), key=group_priority)
+    limit = (
+        config.LIVE_ANNOUNCE_GRAPH_MAX_DESTINATIONS
+        if max_destinations is None else max_destinations
+    )
+    selected_groups = selected_groups[:max(0, limit)]
+
+    for destination_hash, events in selected_groups:
         all_observations = [item for event in events for item in observations(event)]
         route = min(
             all_observations,
@@ -423,6 +454,12 @@ def _announce_graph_enrichment(
             })
             edge_pairs.add((source_id, destination["id"]))
 
+    return {
+        "available_destination_count": len(grouped),
+        "enriched_destination_count": len(selected_groups),
+        "suppressed_destination_count": max(0, len(grouped) - len(selected_groups)),
+    }
+
 
 def _path_groups(
     destinations: list[dict[str, Any]], edges: list[dict[str, Any]]
@@ -529,7 +566,7 @@ def topology_snapshot(
     announce_events = announce_capture.get("events", [])
     if not isinstance(announce_events, list):
         announce_events = []
-    _announce_graph_enrichment(state, announce_events)
+    enrichment_summary = _announce_graph_enrichment(state, announce_events)
     aspect_counts: dict[str, int] = {}
     for event in announce_events:
         if not isinstance(event, dict):
@@ -546,9 +583,7 @@ def topology_snapshot(
         "evicted_count": int(announce_capture.get("evicted_count") or 0),
         "aspect_counts": aspect_counts,
         "error": announce_capture.get("error"),
-        "enriched_destination_count": len([
-            item for item in state["destinations"] if item.get("announced")
-        ]),
+        **enrichment_summary,
     }
     if not include_announces:
         state["announces"] = {

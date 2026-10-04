@@ -3,6 +3,7 @@ import subprocess
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sim import config
 from sim.live_rns import LiveRNSProvider, topology_snapshot
@@ -457,6 +458,34 @@ class LiveRNSCollectionTests(unittest.TestCase):
         self.assertEqual(path_edge["source"], "transport:transport-x")
         self.assertEqual(path_edge["unknown_hops"], 2)
         self.assertEqual(path_edge["evidence"], "received_announce")
+
+    def test_announce_graph_is_bounded_without_discarding_capture_summary(self):
+        state = LiveRNSProvider.normalize(STATUS, [], label="Patroon")
+        state["announces"] = {
+            "active": True,
+            "events": [
+                {
+                    "id": f"packet-{number}",
+                    "destination_hash": f"{number:032x}",
+                    "identity_hash": f"{number:064x}",
+                    "aspect": "lxmf.delivery",
+                    "received_at": float(number),
+                    "reporter_id": "patroon",
+                    "route_hops": 1,
+                    "route_interface": "BackboneInterface[NYC Backbone]",
+                }
+                for number in range(5)
+            ],
+        }
+
+        with patch("sim.live_rns.config.LIVE_ANNOUNCE_GRAPH_MAX_DESTINATIONS", 2):
+            compact = topology_snapshot(state)
+
+        self.assertEqual(compact["announce_summary"]["available_destination_count"], 5)
+        self.assertEqual(compact["announce_summary"]["enriched_destination_count"], 2)
+        self.assertEqual(compact["announce_summary"]["suppressed_destination_count"], 3)
+        self.assertEqual(len(compact["destinations"]), 2)
+        self.assertNotIn("events", compact["announces"])
 
     def test_zero_hop_local_path_does_not_create_a_transport(self):
         destination_hash = "c" * 32
