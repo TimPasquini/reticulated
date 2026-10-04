@@ -62,6 +62,7 @@ class LiveReportRegistry:
         storage_path: str | None = None,
         cache_interval: float = 0.0,
         announce_db_path: str | None = None,
+        local_reporter_id: str | None = None,
     ) -> None:
         self.stale_after = stale_after
         self._lock = threading.Lock()
@@ -71,7 +72,11 @@ class LiveReportRegistry:
         self._last_cache_write = 0.0
         self.cache_error: str | None = None
         self.announce_store = AnnounceEventStore(announce_db_path) if announce_db_path else None
+        self.local_reporter_id = (
+            validate_reporter_id(local_reporter_id) if local_reporter_id else None
+        )
         self._load()
+        self._retire_superseded_local_reports()
 
     def update(
         self,
@@ -126,6 +131,23 @@ class LiveReportRegistry:
             # A damaged cache must not prevent fresh observations from loading.
             self.cache_error = str(exc)
             self._reports = {}
+
+    def _retire_superseded_local_reports(self) -> None:
+        """Remove cached local aliases after the configured reporter ID changes."""
+        if self.local_reporter_id is None:
+            return
+        retired = [
+            reporter_id
+            for reporter_id, entry in self._reports.items()
+            if entry["local"] and reporter_id != self.local_reporter_id
+        ]
+        if not retired:
+            return
+        for reporter_id in retired:
+            del self._reports[reporter_id]
+        # This is a startup migration, so persist it immediately regardless of
+        # the normal write-throttling interval. Remote reports remain intact.
+        self._save_locked(force=True)
 
     def _save_locked(self, *, force: bool = False) -> None:
         if self.storage_path is None:

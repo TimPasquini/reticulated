@@ -47,6 +47,46 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(cached["rmap_interfaces"][0]["transport_id"], "rmap-node")
         self.assertTrue(restored.list()[0]["local"])
 
+    def test_startup_retires_only_cached_local_reporter_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reports.json.gz"
+            registry = LiveReportRegistry(storage_path=str(path))
+            registry.update(
+                "garage-reticulum-node",
+                snapshot("Old Patroon", transport_id="patroon-hash"),
+                received_at=100.0,
+                local=True,
+            )
+            registry.update(
+                "patroon",
+                snapshot("Patroon", transport_id="patroon-hash"),
+                received_at=200.0,
+                local=True,
+            )
+            registry.update(
+                "fedora-laptop",
+                snapshot("Fedora laptop"),
+                received_at=150.0,
+            )
+
+            restored = LiveReportRegistry(
+                storage_path=str(path), local_reporter_id="patroon"
+            )
+            # Reload without reconciliation to prove the corrected set was
+            # written back to disk, not merely hidden in memory.
+            persisted = LiveReportRegistry(storage_path=str(path))
+
+        self.assertEqual(
+            {item["id"] for item in restored.list()},
+            {"patroon", "fedora-laptop"},
+        )
+        self.assertEqual(
+            {item["id"] for item in persisted.list()},
+            {"patroon", "fedora-laptop"},
+        )
+        self.assertTrue(restored.get("patroon")["reporter"]["local"])
+        self.assertFalse(restored.get("fedora-laptop")["reporter"]["local"])
+
     def test_stores_independent_reports_and_projects_large_sections(self):
         registry = LiveReportRegistry(stale_after=90)
         report = snapshot("Fedora", observed=("patroon-hash",))

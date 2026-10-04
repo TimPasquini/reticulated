@@ -29,6 +29,7 @@ live_reports = LiveReportRegistry(
     storage_path=config.LIVE_REPORT_CACHE_FILE,
     cache_interval=config.LIVE_REPORT_CACHE_INTERVAL,
     announce_db_path=config.LIVE_ANNOUNCE_DB_FILE,
+    local_reporter_id=config.LIVE_RNS_REPORTER_ID,
 )
 live_layouts = LiveLayoutStore(config.LIVE_LAYOUTS_FILE)
 clients = set()
