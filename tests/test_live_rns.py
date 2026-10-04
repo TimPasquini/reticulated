@@ -342,6 +342,38 @@ class LiveRNSCollectionTests(unittest.TestCase):
             for service in state["local_services"]
         ))
 
+    def test_captured_announce_is_enriched_from_current_path(self):
+        responses = iter([
+            SimpleNamespace(returncode=0, stdout=json.dumps(STATUS), stderr=""),
+            SimpleNamespace(returncode=0, stdout=json.dumps(PATHS), stderr=""),
+            SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr=""),
+        ])
+
+        class Capture:
+            def snapshot(self):
+                return {
+                    "active": True,
+                    "events": [{
+                        "id": "packet-a", "destination_hash": "destination-a",
+                        "received_at": 100.0,
+                    }],
+                }
+
+        provider = LiveRNSProvider(
+            runner=lambda command, timeout: next(responses), announce_capture=Capture()
+        )
+        state = provider.collect()
+
+        event = state["announces"]["events"][0]
+        self.assertEqual(event["route_hops"], 4)
+        self.assertEqual(event["route_via"], "transport-x")
+        self.assertEqual(event["route_interface"], "BackboneInterface[NYC Backbone]")
+        compact = topology_snapshot(state)
+        self.assertEqual(compact["announce_summary"]["event_count"], 1)
+        self.assertNotIn("events", compact["announces"])
+        full = topology_snapshot(state, include_announces=True)
+        self.assertEqual(full["announces"]["events"][0]["id"], "packet-a")
+
     def test_zero_hop_local_path_does_not_create_a_transport(self):
         destination_hash = "c" * 32
         local_path = [{

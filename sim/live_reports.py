@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .announce_store import AnnounceEventStore
 from .live_rns import topology_snapshot
 
 
@@ -41,6 +42,13 @@ def validate_snapshot(snapshot: Any) -> dict[str, Any]:
         isinstance(item, dict) for item in local_services
     ):
         raise ValueError("snapshot local_services must be a list of objects")
+    announces = snapshot.get("announces")
+    if announces is not None:
+        if not isinstance(announces, dict):
+            raise ValueError("snapshot announces must be an object")
+        events = announces.get("events", [])
+        if not isinstance(events, list) or not all(isinstance(item, dict) for item in events):
+            raise ValueError("snapshot announce events must be a list of objects")
     return snapshot
 
 
@@ -53,6 +61,7 @@ class LiveReportRegistry:
         stale_after: float = 90.0,
         storage_path: str | None = None,
         cache_interval: float = 0.0,
+        announce_db_path: str | None = None,
     ) -> None:
         self.stale_after = stale_after
         self._lock = threading.Lock()
@@ -61,6 +70,7 @@ class LiveReportRegistry:
         self.cache_interval = max(0.0, cache_interval)
         self._last_cache_write = 0.0
         self.cache_error: str | None = None
+        self.announce_store = AnnounceEventStore(announce_db_path) if announce_db_path else None
         self._load()
 
     def update(
@@ -79,6 +89,8 @@ class LiveReportRegistry:
             "local": local,
             "snapshot": json.loads(json.dumps(snapshot)),
         }
+        if self.announce_store is not None:
+            self.announce_store.ingest(reporter_id, snapshot.get("announces"))
         with self._lock:
             self._reports[reporter_id] = entry
             self._save_locked()
@@ -147,7 +159,8 @@ class LiveReportRegistry:
             self.cache_error = str(exc)
 
     def get(
-        self, reporter_id: str, *, include_paths: bool = False, include_rmap: bool = False
+        self, reporter_id: str, *, include_paths: bool = False, include_rmap: bool = False,
+        include_announces: bool = False,
     ) -> dict[str, Any] | None:
         validate_reporter_id(reporter_id)
         with self._lock:
@@ -181,7 +194,8 @@ class LiveReportRegistry:
             enriched_destinations.append(destination)
         snapshot["destinations"] = enriched_destinations
         state = topology_snapshot(
-            snapshot, include_paths=include_paths, include_rmap=include_rmap
+            snapshot, include_paths=include_paths, include_rmap=include_rmap,
+            include_announces=include_announces,
         )
         state["reporter"] = self._metadata(copied)
         return state
@@ -208,6 +222,7 @@ class LiveReportRegistry:
             "local": bool(entry["local"]),
             "interface_count": len(snapshot.get("interfaces", [])),
             "destination_count": len(snapshot.get("destinations", [])),
+            "announce_count": len((snapshot.get("announces") or {}).get("events", [])),
         }
 
     def correlations(self) -> list[dict[str, Any]]:
@@ -237,7 +252,8 @@ class LiveReportRegistry:
         ]
 
     def network(
-        self, *, include_paths: bool = False, include_rmap: bool = False
+        self, *, include_paths: bool = False, include_rmap: bool = False,
+        include_announces: bool = False,
     ) -> dict[str, Any] | None:
         """Merge reporter evidence without fabricating unobserved route segments."""
         with self._lock:
@@ -265,6 +281,10 @@ class LiveReportRegistry:
         path_summary_candidates: dict[str, tuple[tuple[Any, ...], str | None]] = {}
         reporter_metadata: list[dict[str, Any]] = []
         reporter_health: dict[str, dict[str, Any]] = {}
+        announce_events_by_id: dict[str, dict[str, Any]] = {}
+        announce_evicted = 0
+        announce_active = False
+        announce_errors: list[str] = []
 
         for entry in entries:
             reporter_id = entry["reporter_id"]
@@ -272,6 +292,35 @@ class LiveReportRegistry:
             metadata = self._metadata(entry)
             reporter_metadata.append(metadata)
             root = snapshot["root"]
+            announce_capture = snapshot.get("announces", {})
+            if isinstance(announce_capture, dict):
+                announce_active = announce_active or bool(announce_capture.get("active"))
+                announce_evicted += int(announce_capture.get("evicted_count") or 0)
+                if announce_capture.get("error"):
+                    announce_errors.append(f"{reporter_id}: {announce_capture['error']}")
+                for event in announce_capture.get("events", []):
+                    if not isinstance(event, dict) or not event.get("id"):
+                        continue
+                    event_id = str(event["id"])
+                    existing_event = announce_events_by_id.get(event_id)
+                    observation = {
+                        "reporter_id": reporter_id,
+                        "received_at": event.get("received_at"),
+                        "route_hops": event.get("route_hops"),
+                        "route_via": event.get("route_via"),
+                        "route_interface": event.get("route_interface"),
+                    }
+                    if existing_event is None:
+                        announce_events_by_id[event_id] = {
+                            **event,
+                            "observed_by": [reporter_id],
+                            "observations": [observation],
+                        }
+                    else:
+                        existing_event["observed_by"] = sorted(set(
+                            existing_event["observed_by"] + [reporter_id]
+                        ))
+                        existing_event["observations"].append(observation)
             for service in snapshot.get("local_services", []):
                 destination_hash = str(service.get("destination_hash") or "").lower()
                 merged_service = {**service, "reporter_id": reporter_id}
@@ -485,6 +534,14 @@ class LiveReportRegistry:
             "edges": edges,
             "health": reporter_health,
             "correlations": self.correlations(),
+            "announces": {
+                "version": 1,
+                "active": announce_active,
+                "event_count": len(announce_events_by_id),
+                "evicted_count": announce_evicted,
+                "error": "; ".join(announce_errors) if announce_errors else None,
+                "events": list(announce_events_by_id.values()),
+            },
         }
         if not include_paths:
             counts_by_transport: dict[str, int] = {}
@@ -496,7 +553,8 @@ class LiveReportRegistry:
                 "by_transport": counts_by_transport,
             }
         projected = topology_snapshot(
-            merged, include_paths=include_paths, include_rmap=include_rmap
+            merged, include_paths=include_paths, include_rmap=include_rmap,
+            include_announces=include_announces,
         )
         projected["reporter"] = {
             "id": "all",

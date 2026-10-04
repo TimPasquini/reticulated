@@ -103,6 +103,36 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(merged["observed_by"], ["fedora", "patroon"])
         self.assertEqual(len(merged["observations"]), 2)
 
+    def test_network_merges_announce_provenance_and_persists_observations(self):
+        event = {
+            "id": "packet-a", "received_at": 100.0,
+            "destination_hash": "d" * 32, "identity_hash": "i" * 32,
+            "packet_hash": "a" * 64, "aspect": "lxmf.delivery",
+            "app_data_length": 0,
+        }
+        patroon = snapshot("Patroon", transport_id="patroon")
+        patroon["announces"] = {"active": True, "events": [event]}
+        fedora = snapshot("Fedora")
+        fedora["announces"] = {
+            "active": True,
+            "events": [{**event, "received_at": 101.0, "route_hops": 2}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            registry = LiveReportRegistry(
+                announce_db_path=str(Path(directory) / "announces.sqlite3")
+            )
+            registry.update("patroon", patroon, local=True)
+            registry.update("fedora", fedora)
+            network = registry.network(include_announces=True)
+
+            self.assertEqual(registry.announce_store.count(), 2)
+        self.assertEqual(network["announce_summary"]["event_count"], 1)
+        self.assertEqual(
+            network["announces"]["events"][0]["observed_by"],
+            ["fedora", "patroon"],
+        )
+        self.assertEqual(len(network["announces"]["events"][0]["observations"]), 2)
+
     def test_network_unifies_reporter_roots_and_keeps_closest_path_observation(self):
         fedora = snapshot("Fedora", observed=("patroon-hash",))
         fedora["interfaces"] = [

@@ -33,6 +33,16 @@ LIVE_REPORT_CACHE_FILE = os.environ.get(
     "LIVE_REPORT_CACHE_FILE", os.path.join(DATA_DIR, "live-reports.json.gz")
 )
 LIVE_REPORT_CACHE_INTERVAL = float(os.environ.get("LIVE_REPORT_CACHE_INTERVAL", "300"))
+LIVE_ANNOUNCE_CAPTURE_ENABLED = os.environ.get(
+    "LIVE_ANNOUNCE_CAPTURE_ENABLED", "true"
+).lower() in ("1", "true", "yes", "on")
+LIVE_ANNOUNCE_MAX_EVENTS = int(os.environ.get("LIVE_ANNOUNCE_MAX_EVENTS", "2048"))
+LIVE_ANNOUNCE_APP_DATA_PREVIEW = int(
+    os.environ.get("LIVE_ANNOUNCE_APP_DATA_PREVIEW", "512")
+)
+LIVE_ANNOUNCE_DB_FILE = os.environ.get(
+    "LIVE_ANNOUNCE_DB_FILE", os.path.join(DATA_DIR, "announces.sqlite3")
+)
 LIVE_RNS_INGEST_ENABLED = os.environ.get("LIVE_RNS_INGEST_ENABLED", "false").lower() in (
     "1", "true", "yes", "on"
 )

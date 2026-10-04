@@ -66,6 +66,13 @@ Optional live-mode settings are:
   path and RMAP data
 - `LIVE_REPORT_CACHE_INTERVAL`: minimum seconds between compressed cache writes
   (default `300`; in-memory data still updates immediately)
+- `LIVE_ANNOUNCE_CAPTURE_ENABLED`: attach a read-only announce handler to the
+  existing shared RNS instance (default `true`)
+- `LIVE_ANNOUNCE_MAX_EVENTS`: bounded per-reporter in-memory event buffer
+  (default `2048`)
+- `LIVE_ANNOUNCE_APP_DATA_PREVIEW`: maximum app-data preview bytes retained per
+  event (default `512`; full payload length and SHA-256 are still recorded)
+- `LIVE_ANNOUNCE_DB_FILE`: durable, deduplicated announce history database
 - `LIVE_LAYOUTS_FILE`: persistent named and autosaved live graph layouts
 
 Live paths show only what the local transport reports. Solid edges represent
@@ -141,8 +148,16 @@ python -m sim.reporter \
   --label 'Fedora laptop'
 ```
 
-The reporter gzip-compresses normalized `rnstatus -j`, `rnpath -t -j`, and
-`rnstatus -d -j` observations inside a versioned RNS request. RNS automatically
+The reporter also registers a public RNS announce handler on the existing
+shared instance. It records destination, announcing identity, packet hash,
+receive time, recognized aspect, bounded app-data metadata, and the current
+route hop/interface evidence when available. It does not retain unlimited raw
+payloads. Patroon deduplicates every reporter observation into
+`announces.sqlite3`; recent events can be inspected through
+`GET /api/live/announces`.
+
+The reporter gzip-compresses normalized `rnstatus -j`, `rnpath -t -j`,
+`rnstatus -d -j`, and its bounded announce-event buffer inside a versioned RNS request. RNS automatically
 uses a Resource when a snapshot is larger than one packet. The listener accepts
 only identified peers in its allowlist and verifies that the claimed reporter
 ID matches the identity's enrollment. The reporter never invokes interface
@@ -181,6 +196,7 @@ Useful endpoints are:
 
 - `GET /api/live/reporters`
 - `GET /api/live/network`
+- `GET /api/live/announces`
 - `GET /api/live/reporters/{id}/state`
 - `POST /api/live/reporters/{id}` (optional HTTP compatibility path; token required)
 

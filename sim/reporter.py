@@ -13,6 +13,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import config
+from .announce_capture import AnnounceCapture
 from .live_reports import validate_reporter_id
 from .live_rns import LiveRNSProvider
 from .rns_reporting import RNSReportClient, load_or_create_identity
@@ -66,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", dest="config_dir", help="alternate Reticulum config directory")
     parser.add_argument("--rnstatus", default="rnstatus", help="rnstatus executable")
     parser.add_argument("--rnpath", default="rnpath", help="rnpath executable")
+    parser.add_argument(
+        "--no-announce-capture", action="store_true",
+        help="disable live metadata capture for received announces",
+    )
+    parser.add_argument(
+        "--announce-max-events", type=int, default=config.LIVE_ANNOUNCE_MAX_EVENTS,
+        help="bounded announce event buffer included in reports",
+    )
     parser.add_argument("--once", action="store_true", help="send one report and exit")
     return parser
 
@@ -118,33 +128,50 @@ def main() -> None:
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
         print(f"reporter identity: {identity_hash}", flush=True)
-    while True:
-        snapshot = provider.collect()
-        try:
-            if rns_client is not None:
-                rns_client.send_report(args.reporter_id, args.label, snapshot)
-            else:
-                assert args.server is not None and token is not None
-                send_report(args.server, args.reporter_id, token, snapshot)
-            print(
-                f"reported {args.reporter_id}: "
-                f"{len(snapshot['interfaces'])} interfaces, "
-                f"{len(snapshot['destinations'])} destinations",
-                flush=True,
-            )
-        except (
-            OSError,
-            TimeoutError,
-            urllib.error.URLError,
-            urllib.error.HTTPError,
-            ValueError,
-        ) as exc:
-            print(f"report failed: {exc}", file=sys.stderr, flush=True)
+    announce_capture = None
+    if not args.no_announce_capture:
+        announce_capture = AnnounceCapture(
+            config_dir=args.config_dir,
+            max_events=args.announce_max_events,
+            app_data_preview_bytes=config.LIVE_ANNOUNCE_APP_DATA_PREVIEW,
+        )
+        announce_capture.start()
+        provider.announce_capture = announce_capture
+    try:
+        while True:
+            snapshot = provider.collect()
+            try:
+                if rns_client is not None:
+                    rns_client.send_report(args.reporter_id, args.label, snapshot)
+                else:
+                    assert args.server is not None and token is not None
+                    send_report(args.server, args.reporter_id, token, snapshot)
+                announce_count = len(snapshot.get("announces", {}).get("events", []))
+                print(
+                    f"reported {args.reporter_id}: "
+                    f"{len(snapshot['interfaces'])} interfaces, "
+                    f"{len(snapshot['destinations'])} destinations, "
+                    f"{announce_count} announce events",
+                    flush=True,
+                )
+            except (
+                OSError,
+                TimeoutError,
+                urllib.error.URLError,
+                urllib.error.HTTPError,
+                ValueError,
+            ) as exc:
+                print(f"report failed: {exc}", file=sys.stderr, flush=True)
+                if args.once:
+                    raise SystemExit(1) from exc
             if args.once:
-                raise SystemExit(1) from exc
-        if args.once:
-            return
-        time.sleep(args.interval)
+                return
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return
+    finally:
+        if announce_capture is not None:
+            announce_capture.stop()
 
 
 if __name__ == "__main__":

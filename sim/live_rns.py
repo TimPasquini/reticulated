@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import config
+from .announce_capture import AnnounceCapture
 from .live_services import discover_local_services
 
 
@@ -150,7 +151,8 @@ def _rmap_attachments(
 
 
 def topology_snapshot(
-    source: dict[str, Any], *, include_paths: bool = False, include_rmap: bool = False
+    source: dict[str, Any], *, include_paths: bool = False, include_rmap: bool = False,
+    include_announces: bool = False,
 ) -> dict[str, Any]:
     """Project a full normalized report into the requested API representation."""
     # This projection only replaces top-level collections; it never mutates
@@ -194,6 +196,33 @@ def topology_snapshot(
         {match["interface_id"] for match in state["rmap_matches"]}
     )
     state["rmap_summary"]["attachment_count"] = len(state["rmap_attachments"])
+    announce_capture = state.get("announces")
+    if not isinstance(announce_capture, dict):
+        announce_capture = {"active": False, "events": [], "error": None}
+    announce_events = announce_capture.get("events", [])
+    if not isinstance(announce_events, list):
+        announce_events = []
+    aspect_counts: dict[str, int] = {}
+    for event in announce_events:
+        if not isinstance(event, dict):
+            continue
+        aspect = str(event.get("aspect") or "unknown")
+        aspect_counts[aspect] = aspect_counts.get(aspect, 0) + 1
+    state["announce_summary"] = {
+        "active": bool(announce_capture.get("active")),
+        "event_count": len(announce_events),
+        "destination_count": len({
+            event.get("destination_hash") for event in announce_events
+            if isinstance(event, dict) and event.get("destination_hash")
+        }),
+        "evicted_count": int(announce_capture.get("evicted_count") or 0),
+        "aspect_counts": aspect_counts,
+        "error": announce_capture.get("error"),
+    }
+    if not include_announces:
+        state["announces"] = {
+            key: value for key, value in announce_capture.items() if key != "events"
+        }
     if not include_paths:
         local_destination_ids = {
             item["id"] for item in service_destinations if item.get("id")
@@ -283,6 +312,7 @@ class LiveRNSProvider:
         rnstatus_path: str | None = None,
         rnpath_path: str | None = None,
         config_dir: str | None = None,
+        announce_capture: AnnounceCapture | None = None,
     ) -> None:
         self.label = label or config.LIVE_RNS_LABEL
         self.timeout = timeout if timeout is not None else config.LIVE_RNS_TIMEOUT
@@ -290,6 +320,7 @@ class LiveRNSProvider:
         self.rnstatus_path = rnstatus_path or config.RNSTATUS_PATH
         self.rnpath_path = rnpath_path or config.RNPATH_PATH
         self.config_dir = config_dir if config_dir is not None else config.LIVE_RNS_CONFIG_DIR
+        self.announce_capture = announce_capture
         self._lock = threading.Lock()
         self._last_status: dict[str, Any] | None = None
         self._last_paths: list[dict[str, Any]] | None = None
@@ -316,12 +347,14 @@ class LiveRNSProvider:
             "destinations": [],
             "rmap_interfaces": [],
             "local_services": [],
+            "announces": {"version": 1, "active": False, "events": []},
             "edges": [],
             "health": {
                 "rnstatus": {"ok": False, "error": "not collected yet"},
                 "rnpath": {"ok": False, "error": "not collected yet"},
                 "rmap": {"ok": False, "error": "not collected yet"},
                 "services": {"ok": True, "error": None},
+                "announces": {"ok": True, "error": None},
             },
         }
 
@@ -427,6 +460,32 @@ class LiveRNSProvider:
             discovered=self._last_discovered or [],
             local_services=local_services,
         )
+        if self.announce_capture is not None:
+            announce_state = self.announce_capture.snapshot()
+            paths_by_hash = {
+                str(path.get("hash") or "").lower(): path
+                for path in (self._last_paths or []) if path.get("hash")
+            }
+            enriched_events = []
+            for event in announce_state.get("events", []):
+                path = paths_by_hash.get(str(event.get("destination_hash") or "").lower())
+                enriched_events.append({
+                    **event,
+                    **({
+                        "route_hops": _as_int(path.get("hops")),
+                        "route_via": path.get("via"),
+                        "route_interface": path.get("interface"),
+                    } if path else {}),
+                })
+            announce_state["events"] = enriched_events
+            normalized["announces"] = announce_state
+            announce_health = {
+                "ok": bool(announce_state.get("active")),
+                "error": announce_state.get("error"),
+            }
+        else:
+            normalized["announces"] = {"version": 1, "active": False, "events": []}
+            announce_health = {"ok": True, "error": None}
         normalized["collected_at"] = time.time()
         normalized["stale"] = not (status_health["ok"] and path_health["ok"])
         normalized["health"] = {
@@ -434,6 +493,7 @@ class LiveRNSProvider:
             "rnpath": path_health,
             "rmap": rmap_health,
             "services": service_health,
+            "announces": announce_health,
         }
         with self._lock:
             self._state = normalized
@@ -445,7 +505,8 @@ class LiveRNSProvider:
             return json.loads(json.dumps(self._state))
 
     def topology_snapshot(
-        self, *, include_paths: bool = False, include_rmap: bool = False
+        self, *, include_paths: bool = False, include_rmap: bool = False,
+        include_announces: bool = False,
     ) -> dict[str, Any]:
         """Return the observed graph, omitting path-table fan-out by default.
 
@@ -454,7 +515,8 @@ class LiveRNSProvider:
         browser tabs from rebuilding thousands of destination nodes.
         """
         return topology_snapshot(
-            self.snapshot(), include_paths=include_paths, include_rmap=include_rmap
+            self.snapshot(), include_paths=include_paths, include_rmap=include_rmap,
+            include_announces=include_announces,
         )
 
     @staticmethod

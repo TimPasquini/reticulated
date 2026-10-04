@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import config
+from .announce_capture import AnnounceCapture
 from .live_rns import LiveRNSProvider
 from .live_reports import LiveReportRegistry, validate_reporter_id
 from .live_layouts import LiveLayoutStore
@@ -27,6 +28,7 @@ live_reports = LiveReportRegistry(
     stale_after=config.LIVE_REPORT_STALE_AFTER,
     storage_path=config.LIVE_REPORT_CACHE_FILE,
     cache_interval=config.LIVE_REPORT_CACHE_INTERVAL,
+    announce_db_path=config.LIVE_ANNOUNCE_DB_FILE,
 )
 live_layouts = LiveLayoutStore(config.LIVE_LAYOUTS_FILE)
 clients = set()
@@ -34,6 +36,7 @@ clients_lock = asyncio.Lock()
 rns_report_listener: RNSReportListener | None = None
 live_collector: PeriodicCollector | None = None
 status_collector: PeriodicCollector | None = None
+announce_capture: AnnounceCapture | None = None
 
 
 class NodeBody(BaseModel):
@@ -153,7 +156,7 @@ async def event_pump():
 
 @asynccontextmanager
 async def lifespan(app):
-    global live_collector, rns_report_listener, status_collector
+    global announce_capture, live_collector, rns_report_listener, status_collector
     if config.LIVE_RNS_INGEST_ENABLED:
         rns_report_listener = RNSReportListener(
             live_reports,
@@ -169,6 +172,14 @@ async def lifespan(app):
         if service is not None:
             live_rns.register_local_service(service)
         print(f"Reticulated RNS ingest destination: {destination_hash}", flush=True)
+    if config.LIVE_ANNOUNCE_CAPTURE_ENABLED:
+        announce_capture = AnnounceCapture(
+            config_dir=config.LIVE_RNS_CONFIG_DIR,
+            max_events=config.LIVE_ANNOUNCE_MAX_EVENTS,
+            app_data_preview_bytes=config.LIVE_ANNOUNCE_APP_DATA_PREVIEW,
+        )
+        announce_capture.start()
+        live_rns.announce_capture = announce_capture
     live_collector = PeriodicCollector(
         live_rns.collect,
         lambda snapshot: live_reports.update(
@@ -199,6 +210,8 @@ async def lifespan(app):
             live_collector.stop()
         if status_collector is not None:
             status_collector.stop()
+        if announce_capture is not None:
+            announce_capture.stop()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -223,10 +236,14 @@ async def get_status():
 
 
 @app.get("/api/live/state")
-def get_live_state(include_paths: bool = False, include_rmap: bool = False):
+def get_live_state(
+    include_paths: bool = False, include_rmap: bool = False,
+    include_announces: bool = False,
+):
     """Return the latest read-only view of the local shared RNS instance."""
     return live_rns.topology_snapshot(
-        include_paths=include_paths, include_rmap=include_rmap
+        include_paths=include_paths, include_rmap=include_rmap,
+        include_announces=include_announces,
     )
 
 
@@ -246,17 +263,64 @@ def get_live_reporters():
             "persistent": live_reports.storage_path is not None,
             "error": live_reports.cache_error,
         },
+        "announce_capture": {
+            "enabled": config.LIVE_ANNOUNCE_CAPTURE_ENABLED,
+            "active": bool(announce_capture and announce_capture.status().get("active")),
+            "stored_events": (
+                live_reports.announce_store.count() if live_reports.announce_store else 0
+            ),
+            "error": (
+                live_reports.announce_store.error if live_reports.announce_store else None
+            ),
+        },
     }
 
 
 @app.get("/api/live/network")
-def get_live_network(include_paths: bool = False, include_rmap: bool = False):
+def get_live_network(
+    include_paths: bool = False, include_rmap: bool = False,
+    include_announces: bool = False,
+):
     state = live_reports.network(
-        include_paths=include_paths, include_rmap=include_rmap
+        include_paths=include_paths, include_rmap=include_rmap,
+        include_announces=include_announces,
     )
     if state is None:
         raise HTTPException(status_code=503, detail="no live reports collected yet")
     return state
+
+
+@app.get("/api/live/announces")
+def get_live_announces(
+    limit: int = 100,
+    reporter_id: str | None = None,
+    destination_hash: str | None = None,
+):
+    store = live_reports.announce_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="announce persistence is disabled")
+    if reporter_id is not None:
+        try:
+            validate_reporter_id(reporter_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if destination_hash is not None:
+        destination_hash = destination_hash.lower()
+        try:
+            decoded = bytes.fromhex(destination_hash)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid destination hash") from exc
+        if len(decoded) != 16:
+            raise HTTPException(status_code=400, detail="invalid destination hash")
+    return {
+        "count": store.count(),
+        "events": store.recent(
+            limit=limit,
+            reporter_id=reporter_id,
+            destination_hash=destination_hash,
+        ),
+        "error": store.error,
+    }
 
 
 @app.get("/api/live/layouts")
@@ -288,11 +352,13 @@ def put_live_layout(scope: str, name: str, body: LiveLayoutBody):
 
 @app.get("/api/live/reporters/{reporter_id}/state")
 def get_live_reporter_state(
-    reporter_id: str, include_paths: bool = False, include_rmap: bool = False
+    reporter_id: str, include_paths: bool = False, include_rmap: bool = False,
+    include_announces: bool = False,
 ):
     try:
         state = live_reports.get(
-            reporter_id, include_paths=include_paths, include_rmap=include_rmap
+            reporter_id, include_paths=include_paths, include_rmap=include_rmap,
+            include_announces=include_announces,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
