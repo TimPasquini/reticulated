@@ -12,8 +12,8 @@ class LiveLayoutStoreTests(unittest.TestCase):
             store = LiveLayoutStore(path)
             store.save("all", "Patroon anchors", {
                 "positions": {
-                    "transport:patroon": {"x": 10, "y": 20},
-                    "interface:garage": {"x": 40.5, "y": 60.5},
+                    "transport:patroon": {"x": -10.25, "y": 20.75},
+                    "interface:garage": {"x": 40.5, "y": -60.5},
                 },
                 "pinned": ["transport:patroon"],
                 "viewport": {"zoom": 1.25, "pan": {"x": 5, "y": -8}},
@@ -21,7 +21,14 @@ class LiveLayoutStoreTests(unittest.TestCase):
 
             restored = LiveLayoutStore(path).get("all", "Patroon anchors")
 
-        self.assertEqual(restored["positions"]["transport:patroon"], {"x": 10.0, "y": 20.0})
+        self.assertEqual(
+            restored["positions"]["transport:patroon"],
+            {"x": -10.25, "y": 20.75},
+        )
+        self.assertEqual(
+            restored["positions"]["interface:garage"],
+            {"x": 40.5, "y": -60.5},
+        )
         self.assertEqual(restored["pinned"], ["transport:patroon"])
         self.assertEqual(restored["viewport"]["zoom"], 1.25)
 

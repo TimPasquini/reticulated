@@ -1,3 +1,5 @@
+import { mergeLivePositions, pruneLiveLayout, rememberLivePosition } from "./live-layout.mjs";
+
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },
   async send(method, path, body) {
@@ -57,6 +59,7 @@ const state = {
   liveSavedLayout: null,
   liveLayoutScope: null,
   liveLayoutSaveTimer: null,
+  liveLayoutSaveGeneration: 0,
   liveLayouts: [],
   topology: { nodes: {}, links: {} },
   addresses: {},
@@ -680,12 +683,30 @@ function captureLiveLayout() {
   };
 }
 
+function rememberLiveNodePosition(node) {
+  if (!node || !node.nonempty()) return;
+  const position = node.position();
+  if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) return;
+  // Immediately invalidate any save that captured the position before this
+  // move. The next debounced save receives a new generation of its own.
+  state.liveLayoutSaveGeneration += 1;
+  state.liveSavedLayout = rememberLivePosition(
+    state.liveSavedLayout, node.id(), position, state.livePinned
+  );
+}
+
 async function saveLiveLayout(name, quiet) {
   if (state.uiMode !== "live" || !cy.nodes("[liveKind]").length) return;
-  const saved = await api.put(liveLayoutPath(liveLayoutScope(), name), captureLiveLayout());
+  const scope = liveLayoutScope();
+  const generation = ++state.liveLayoutSaveGeneration;
+  const saved = await api.put(liveLayoutPath(scope, name), captureLiveLayout());
   if (!saved || !saved.positions) return;
+  // A slow earlier request must not replace coordinates captured by a later
+  // drag, nor install a layout after the user switched reporter scopes.
+  if (generation !== state.liveLayoutSaveGeneration || scope !== liveLayoutScope()) return saved;
   state.liveSavedLayout = saved;
   if (!quiet) await refreshLiveLayouts();
+  return saved;
 }
 
 function scheduleLiveAutosave() {
@@ -987,14 +1008,11 @@ function rebuildLive(snapshot) {
     });
     return;
   }
-  const positions = livePositions(snapshot, renderModel);
+  const generatedPositions = livePositions(snapshot, renderModel);
   const savedPositions = (state.liveSavedLayout || {}).positions || {};
-  Object.keys(savedPositions).forEach((id) => { positions[id] = savedPositions[id]; });
-  Object.keys(oldPositions).forEach((id) => {
-    // Preserve every surviving node, including enrichment nodes that are not
-    // part of the base RNS position model.
-    positions[id] = oldPositions[id];
-  });
+  const positions = mergeLivePositions(
+    generatedPositions, savedPositions, oldPositions, state.livePinned
+  );
   cy.elements().remove();
   const els = [];
   const roots = snapshot.reporter_roots || [snapshot.root];
@@ -1095,19 +1113,11 @@ function rebuildLive(snapshot) {
   state.liveGraphSignature = graphSignature;
   if (state.liveSavedLayout && state.liveSavedLayout.positions) {
     const activeIds = new Set(cy.nodes("[liveKind]").map((node) => node.id()));
-    const prunedPositions = {};
-    Object.entries(state.liveSavedLayout.positions).forEach(([id, position]) => {
-      if (activeIds.has(id)) prunedPositions[id] = position;
-    });
-    const prunedPins = (state.liveSavedLayout.pinned || []).filter((id) => activeIds.has(id));
-    if (Object.keys(prunedPositions).length !== Object.keys(state.liveSavedLayout.positions).length ||
-        prunedPins.length !== (state.liveSavedLayout.pinned || []).length) {
-      state.liveSavedLayout = {
-        ...state.liveSavedLayout,
-        positions: prunedPositions,
-        pinned: prunedPins,
-      };
-      state.livePinned = new Set(prunedPins);
+    const pruned = pruneLiveLayout(state.liveSavedLayout, activeIds);
+    if (pruned.changed) {
+      state.liveLayoutSaveGeneration += 1;
+      state.liveSavedLayout = pruned.layout;
+      state.livePinned = new Set(pruned.layout.pinned || []);
       scheduleLiveAutosave();
     }
   }
@@ -1851,11 +1861,15 @@ cy.on("dragfree", "node.medium", (e) => {
 });
 cy.on("dragfree", "node[liveKind]", (e) => {
   state.livePinned.add(e.target.id());
+  rememberLiveNodePosition(e.target);
   applyLivePins();
   scheduleLiveAutosave();
 });
 cy.on("pan zoom", () => {
-  if (!state.liveLayoutRunning) scheduleLiveAutosave();
+  if (!state.liveLayoutRunning) {
+    state.liveLayoutSaveGeneration += 1;
+    scheduleLiveAutosave();
+  }
 });
 
 document.getElementById("btn-start").onclick = () => api.post("/api/start");
@@ -1871,6 +1885,7 @@ document.getElementById("live-reporter").onchange = (event) => {
   state.liveLayoutScope = null;
   state.liveSavedLayout = null;
   state.livePinned = new Set();
+  state.liveLayoutSaveGeneration += 1;
   state.liveMapHasInitialView = false;
   state.liveMapSignature = null;
   cy.elements().remove();
@@ -1882,6 +1897,7 @@ document.getElementById("btn-live-pin").onclick = () => {
   const id = selected[0].id();
   if (state.livePinned.has(id)) state.livePinned.delete(id);
   else state.livePinned.add(id);
+  rememberLiveNodePosition(selected[0]);
   applyLivePins();
   scheduleLiveAutosave();
 };
@@ -1908,6 +1924,7 @@ document.getElementById("btn-live-load-layout").onclick = async () => {
   if (!name) return;
   const layout = await api.get(liveLayoutPath(liveLayoutScope(), name));
   if (layout && layout.positions) {
+    state.liveLayoutSaveGeneration += 1;
     applyLiveLayout(layout, true);
     scheduleLiveAutosave();
   }
@@ -2155,6 +2172,7 @@ setupHold(document.getElementById("btn-reset"), 3000, () => api.post("/api/reset
 function runLiveLayout(animate) {
   if (!state.live || !cy.nodes().length || state.liveLayoutRunning) return;
   state.liveLayoutRunning = true;
+  state.liveLayoutSaveGeneration += 1;
   const startedAt = performance.now();
   const nodeCount = cy.nodes().length;
   const edgeCount = cy.edges().length;
