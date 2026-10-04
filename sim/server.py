@@ -19,7 +19,7 @@ from .live_rns import LiveRNSProvider
 from .live_reports import LiveReportRegistry, validate_reporter_id
 from .live_layouts import LiveLayoutStore
 from .live_worker import PeriodicCollector
-from .rns_reporting import RNSReportListener
+from .rns_reporting import RNSReportListener, start_report_listener
 from .manager import Simulator
 
 sim = Simulator()
@@ -167,7 +167,7 @@ async def lifespan(app):
             max_bytes=config.LIVE_REPORT_MAX_BYTES,
             announce_interval=config.LIVE_RNS_INGEST_ANNOUNCE_INTERVAL,
         )
-        destination_hash = await asyncio.to_thread(rns_report_listener.start)
+        destination_hash = await start_report_listener(rns_report_listener)
         service = rns_report_listener.service_info()
         if service is not None:
             live_rns.register_local_service(service)

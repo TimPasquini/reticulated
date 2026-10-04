@@ -1,5 +1,7 @@
+import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +12,7 @@ from sim.rns_reporting import (
     decode_report,
     encode_report,
     load_allowlist,
+    start_report_listener,
 )
 
 
@@ -28,6 +31,23 @@ def snapshot():
 
 
 class RNSReportingTests(unittest.TestCase):
+    def test_listener_initialization_stays_on_event_loop_thread(self):
+        caller_thread = threading.get_ident()
+
+        class Listener:
+            started_on = None
+
+            def start(self):
+                self.started_on = threading.get_ident()
+                return "destination"
+
+        listener = Listener()
+        destination = asyncio.run(start_report_listener(listener))
+
+        self.assertEqual(destination, "destination")
+        self.assertEqual(listener.started_on, caller_thread)
+        self.assertIs(threading.current_thread(), threading.main_thread())
+
     def test_round_trips_versioned_compressed_report(self):
         envelope = encode_report("fedora", "Fedora laptop", snapshot())
         reporter_id, decoded = decode_report(envelope)

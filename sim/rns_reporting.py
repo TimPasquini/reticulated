@@ -223,6 +223,18 @@ class RNSReportListener:
             return {"ok": False, "version": PROTOCOL_VERSION, "error": str(exc)[:256]}
 
 
+async def start_report_listener(listener: RNSReportListener) -> str:
+    """Start an RNS listener on the event-loop thread.
+
+    RNS installs process signal handlers while constructing ``Reticulum``.  The
+    normal Uvicorn lifespan runs on the main thread, so this deliberately calls
+    ``start()`` inline instead of dispatching it through ``asyncio.to_thread``.
+    Listener traffic and periodic announces remain managed by RNS/background
+    threads after this short, startup-only initialization step.
+    """
+    return listener.start()
+
+
 class RNSReportClient:
     """Maintain an authenticated RNS link and send complete topology snapshots."""
 
