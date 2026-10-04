@@ -58,6 +58,10 @@ const state = {
   liveLayoutPending: true,
   liveLayoutRunning: false,
   liveLoadInFlight: false,
+  liveLoadGeneration: 0,
+  liveReloadRequested: false,
+  liveDragging: new Map(),
+  liveDeferredSnapshot: null,
   liveGraphSignature: null,
   liveSlots: {},
   liveNextSlot: {},
@@ -1179,30 +1183,51 @@ function updateLiveHealth(snapshot) {
   }
 }
 
+function applyLiveSnapshot(snapshot) {
+  state.live = snapshot;
+  updateLiveHealth(snapshot);
+  if (state.liveView === "map") renderLiveMap(snapshot);
+  else rebuildLive(snapshot);
+}
+
 async function loadLiveState() {
   if (state.uiMode !== "live") return;
-  if (state.liveLayoutRunning || state.liveLoadInFlight) return;
+  if (state.liveLayoutRunning || state.liveLoadInFlight || state.liveDragging.size) {
+    state.liveReloadRequested = true;
+    return;
+  }
   state.liveLoadInFlight = true;
+  state.liveReloadRequested = false;
+  const generation = ++state.liveLoadGeneration;
   try {
     await refreshLiveReporters();
+    if (generation !== state.liveLoadGeneration) return;
     if (!state.liveReporterId) return;
-    await ensureLiveLayoutScope(state.liveReporterId);
+    const reporterScope = state.liveReporterId;
+    await ensureLiveLayoutScope(reporterScope);
+    if (generation !== state.liveLoadGeneration || reporterScope !== state.liveReporterId) return;
     const query = new URLSearchParams();
     if (state.showLiveRmap || state.liveView === "map") query.set("include_rmap", "true");
-    const endpoint = state.liveReporterId === "all"
+    const endpoint = reporterScope === "all"
       ? "/api/live/network"
-      : "/api/live/reporters/" + encodeURIComponent(state.liveReporterId) + "/state";
+      : "/api/live/reporters/" + encodeURIComponent(reporterScope) + "/state";
     const snapshot = await api.get(endpoint + (query.size ? "?" + query.toString() : ""));
-    state.live = snapshot;
-    updateLiveHealth(snapshot);
-    if (state.liveView === "map") renderLiveMap(snapshot);
-    else rebuildLive(snapshot);
+    if (generation !== state.liveLoadGeneration || reporterScope !== state.liveReporterId) return;
+    if (state.liveDragging.size) {
+      state.liveDeferredSnapshot = { reporterScope: reporterScope, snapshot: snapshot };
+      return;
+    }
+    applyLiveSnapshot(snapshot);
   } catch (error) {
     const health = document.getElementById("live-health");
     health.textContent = "Live API unavailable";
     health.classList.add("error");
   } finally {
     state.liveLoadInFlight = false;
+    if (state.liveReloadRequested && !state.liveDragging.size) {
+      state.liveReloadRequested = false;
+      setTimeout(loadLiveState, 0);
+    }
   }
 }
 
@@ -1862,11 +1887,49 @@ cy.on("dragfree", "node.medium", (e) => {
   api.patch("/api/links/" + e.target.id(), { x: p.x, y: p.y });
   if (state.topology.links[e.target.id()]) { state.topology.links[e.target.id()].x = p.x; state.topology.links[e.target.id()].y = p.y; }
 });
-cy.on("dragfree", "node[liveKind]", (e) => {
-  state.livePinned.add(e.target.id());
-  rememberLiveNodePosition(e.target);
-  applyLivePins();
-  scheduleLiveAutosave();
+async function completeLiveNodeDrag(node) {
+  const id = node.id();
+  const start = state.liveDragging.get(id);
+  if (!start || start.committing) return;
+  start.committing = true;
+  const position = node.position();
+  const moved = Math.hypot(position.x - start.x, position.y - start.y) > 0.5;
+  if (moved) {
+    state.livePinned.add(id);
+    // Commit the coordinate before permitting a deferred topology rebuild.
+    rememberLiveNodePosition(node);
+    applyLivePins();
+    try {
+      const saved = await saveLiveLayout("__autosave__", true);
+      if (!saved) scheduleLiveAutosave();
+    } catch (error) {
+      // Keep the in-memory coordinate authoritative and retry shortly.
+      scheduleLiveAutosave();
+    }
+  }
+  state.liveDragging.delete(id);
+  if (state.liveDragging.size) return;
+
+  const deferred = state.liveDeferredSnapshot;
+  state.liveDeferredSnapshot = null;
+  if (deferred && deferred.reporterScope === state.liveReporterId) {
+    applyLiveSnapshot(deferred.snapshot);
+  }
+  if (state.liveReloadRequested) {
+    state.liveReloadRequested = false;
+    setTimeout(loadLiveState, 0);
+  }
+}
+
+cy.on("grab", "node[liveKind]", (e) => {
+  state.liveDragging.set(e.target.id(), { ...e.target.position(), committing: false });
+});
+cy.on("dragfree", "node[liveKind]", (e) => completeLiveNodeDrag(e.target));
+cy.on("free", "node[liveKind]", (e) => {
+  // Usually dragfree completes this transaction. This fallback handles a grab
+  // released without movement, while allowing dragfree to run first.
+  const node = e.target;
+  requestAnimationFrame(() => completeLiveNodeDrag(node));
 });
 cy.on("pan zoom", () => {
   if (!state.liveLayoutRunning) {
@@ -1883,6 +1946,10 @@ document.getElementById("live-reporter").onchange = (event) => {
   saveLiveMapViewport();
   state.liveReporterId = event.target.value;
   state.live = null;
+  state.liveLoadGeneration += 1;
+  state.liveDeferredSnapshot = null;
+  state.liveReloadRequested = true;
+  state.liveDragging.clear();
   state.liveLayoutPending = true;
   state.liveGraphSignature = null;
   state.liveLayoutScope = null;
