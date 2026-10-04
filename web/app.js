@@ -1,4 +1,10 @@
-import { mergeLivePositions, pruneLiveLayout, rememberLivePosition } from "./live-layout.mjs";
+import {
+  anchorNewPositions,
+  mergeLivePositions,
+  pruneLiveLayout,
+  radialClusterPosition,
+  rememberLivePosition,
+} from "./live-layout.mjs";
 
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },
@@ -579,10 +585,7 @@ function livePositions(snapshot, renderModel) {
     const children = (interfacesByRoot.get(root.id) || []).sort();
     const anchor = positions[root.id];
     children.forEach((id, index) => {
-      positions[id] = {
-        x: anchor.x + (index - (children.length - 1) / 2) * 190,
-        y: anchor.y + 170,
-      };
+      positions[id] = radialClusterPosition(anchor, index, 180, 105);
     });
   }
   const peerEdges = renderModel.edges.filter((edge) => edge.kind === "observed_peer_interface");
@@ -597,15 +600,12 @@ function livePositions(snapshot, renderModel) {
     const anchor = positions[parentId];
     if (!anchor) continue;
     childIds.sort().forEach((id, index) => {
-      positions[id] = {
-        x: anchor.x + (index - (childIds.length - 1) / 2) * 150,
-        y: anchor.y + 135,
-      };
+      positions[id] = radialClusterPosition(anchor, index, 145, 90, Math.PI / 3);
     });
   }
   const unpositionedInterfaces = (snapshot.interfaces || []).filter((item) => !positions[item.id]);
   unpositionedInterfaces.forEach((item, index) => {
-    positions[item.id] = { x: (index - (unpositionedInterfaces.length - 1) / 2) * 190, y: 170 };
+    positions[item.id] = radialClusterPosition({ x: 0, y: 0 }, index, 240, 110);
   });
 
   // Spread next hops around the interfaces that observed them. Several next
@@ -623,11 +623,11 @@ function livePositions(snapshot, renderModel) {
     transportGroups.get(groupKey).items.push(item);
   }
   for (const group of transportGroups.values()) {
+    group.items.sort((left, right) => left.id.localeCompare(right.id));
     group.items.forEach((item, index) => {
-      positions[item.id] = {
-        x: group.anchorX + (index - (group.items.length - 1) / 2) * 120,
-        y: group.anchorY + 160,
-      };
+      positions[item.id] = radialClusterPosition(
+        { x: group.anchorX, y: group.anchorY }, index, 175, 90
+      );
     });
   }
 
@@ -651,11 +651,11 @@ function livePositions(snapshot, renderModel) {
       edgesByTier.get(tier).push(edge);
     });
     for (const [tier, tierEdges] of edgesByTier) {
+      tierEdges.sort((left, right) => left.target.localeCompare(right.target));
       tierEdges.forEach((edge, index) => {
-        positions[edge.target] = {
-          x: anchor.x + (index - (tierEdges.length - 1) / 2) * 155,
-          y: anchor.y + 120 + (tier - 1) * 115,
-        };
+        positions[edge.target] = radialClusterPosition(
+          anchor, index, 150 + (tier - 1) * 105, 78, Math.PI / 2 + tier * 0.37
+        );
       });
     }
   }
@@ -1010,8 +1010,11 @@ function rebuildLive(snapshot) {
   }
   const generatedPositions = livePositions(snapshot, renderModel);
   const savedPositions = (state.liveSavedLayout || {}).positions || {};
-  const positions = mergeLivePositions(
+  let positions = mergeLivePositions(
     generatedPositions, savedPositions, oldPositions, state.livePinned
+  );
+  positions = anchorNewPositions(
+    generatedPositions, positions, savedPositions, oldPositions, renderModel.edges
   );
   cy.elements().remove();
   const els = [];
@@ -2176,6 +2179,24 @@ function runLiveLayout(animate) {
   const startedAt = performance.now();
   const nodeCount = cy.nodes().length;
   const edgeCount = cy.edges().length;
+  // Rebuild every unpinned branch from topology-aware seeds on an explicit
+  // Layout request. Only pinned coordinates act as anchors; a bad historical
+  // row must not remain authoritative merely because it is currently drawn.
+  const renderModel = liveRenderModel(state.live);
+  const generated = livePositions(state.live, renderModel);
+  const pinnedPositions = {};
+  cy.nodes("[liveKind]").forEach((node) => {
+    if (state.livePinned.has(node.id())) pinnedPositions[node.id()] = { ...node.position() };
+  });
+  let seeded = mergeLivePositions(
+    generated, pinnedPositions, pinnedPositions, state.livePinned
+  );
+  seeded = anchorNewPositions(
+    generated, seeded, pinnedPositions, pinnedPositions, renderModel.edges
+  );
+  cy.nodes("[liveKind]").forEach((node) => {
+    if (!state.livePinned.has(node.id()) && seeded[node.id()]) node.position(seeded[node.id()]);
+  });
   applyLivePins();
   const fixedNodeConstraint = cy.nodes("[liveKind]").filter((node) =>
     state.livePinned.has(node.id())
@@ -2197,58 +2218,47 @@ function runLiveLayout(animate) {
   };
 
   // Force-directed layouts become disproportionately expensive once announce
-  // enrichment grows into the hundreds or thousands. The graph already has deterministic
-  // topology-aware seed positions, so preserve them and fit the viewport.
+  // enrichment grows into the hundreds. The radial topology seed above still
+  // performs a useful layout instead of leaving large graphs in fixed rows.
   if (nodeCount > 400) {
     cy.nodes("[liveKind]").unlock();
     cy.fit(cy.elements(), 70);
-    finish("seeded positions (force layout skipped)");
+    finish("radial topology clusters (force refinement skipped)");
     return;
   }
 
-  // Pass 1 uses fCoSE's spectral stage to quickly pull apart the hand-seeded
-  // rows and give the force solver a topology-aware starting point.
-  const detangle = cy.layout({
+  // Preserve topology-aware and user-arranged starting positions. The old
+  // random spectral pass discarded those anchors and collapsed branches back
+  // around the generated origin before the force refinement even began.
+  const layout = cy.layout({
     name: "fcose",
-    quality: "draft",
-    randomize: true,
-    animate: false,
-    fit: false,
+    quality: "default",
+    randomize: false,
+    animate: animate,
+    animationDuration: animate ? 700 : 0,
+    fit: true,
+    padding: 70,
+    nodeDimensionsIncludeLabels: true,
     samplingType: true,
     sampleSize: 25,
-    nodeSeparation: 140,
-    packComponents: false,
+    nodeSeparation: 120,
+    nodeRepulsion: 7000,
+    idealEdgeLength: 135,
+    edgeElasticity: 0.35,
+    nestingFactor: 0.1,
+    gravity: 0.08,
+    gravityRange: 4.5,
+    gravityCompound: 0.08,
+    gravityRangeCompound: 2.0,
+    numIter: 2500,
+    initialEnergyOnIncremental: 0.2,
+    packComponents: true,
     fixedNodeConstraint: fixedNodeConstraint,
   });
-  detangle.one("layoutstop", () => {
-    // Pass 2 retains the spectral positions and performs a bounded CoSE
-    // force refinement. Keeping this pass bounded avoids freezing the UI on
-    // large path tables while still relaxing crossings and overlaps.
-    const refine = cy.layout({
-      name: "cose",
-      randomize: false,
-      animate: animate,
-      animationDuration: animate ? 700 : 0,
-      fit: true,
-      padding: 70,
-      nodeDimensionsIncludeLabels: true,
-      nodeOverlap: 28,
-      nodeRepulsion: 40000,
-      idealEdgeLength: 125,
-      edgeElasticity: 100,
-      nestingFactor: 1.2,
-      gravity: 0.8,
-      numIter: 1000,
-      initialTemp: 300,
-      coolingFactor: 0.96,
-      minTemp: 1,
-    });
-    refine.one("layoutstop", () => {
-      finish("fCoSE + CoSE");
-    });
-    refine.run();
+  layout.one("layoutstop", () => {
+    finish("incremental constrained fCoSE");
   });
-  detangle.run();
+  layout.run();
 }
 
 function runLayout() {

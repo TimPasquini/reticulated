@@ -2,10 +2,44 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  anchorNewPositions,
   mergeLivePositions,
   pruneLiveLayout,
+  radialClusterPosition,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("large sibling sets form a bounded cluster instead of an unbounded row", () => {
+  const points = Array.from({ length: 250 }, (_, index) =>
+    radialClusterPosition({ x: 1000, y: -500 }, index, 150, 78)
+  );
+  const width = Math.max(...points.map((point) => point.x)) -
+    Math.min(...points.map((point) => point.x));
+  const height = Math.max(...points.map((point) => point.y)) -
+    Math.min(...points.map((point) => point.y));
+
+  assert.ok(width < 3000);
+  assert.ok(height < 3000);
+  assert.ok(width > 1500);
+  assert.ok(height > 1500);
+});
+
+test("new descendants are translated to a moved parent's final position", () => {
+  const generated = {
+    root: { x: 0, y: 0 },
+    interface: { x: 100, y: 150 },
+    destination: { x: 130, y: 300 },
+  };
+  const current = { root: { x: 1200, y: -800 } };
+  const merged = mergeLivePositions(generated, {}, current, new Set(["root"]));
+  const anchored = anchorNewPositions(generated, merged, {}, current, [
+    { source: "root", target: "interface" },
+    { source: "interface", target: "destination" },
+  ]);
+
+  assert.deepEqual(anchored.interface, { x: 1300, y: -650 });
+  assert.deepEqual(anchored.destination, { x: 1330, y: -500 });
+});
 
 test("persisted pin wins redraw position without changing coordinate signs", () => {
   const positions = mergeLivePositions(

@@ -9,6 +9,70 @@ export function mergeLivePositions(generated, saved, current, pinnedIds) {
   return merged;
 }
 
+export function anchorNewPositions(generated, merged, saved, current, edges) {
+  const positions = { ...(merged || {}) };
+  const existing = new Set([
+    ...Object.keys(saved || {}),
+    ...Object.keys(current || {}),
+  ]);
+  const incoming = new Map();
+  (edges || []).forEach((edge) => {
+    if (!edge || !edge.source || !edge.target) return;
+    if (!incoming.has(edge.target)) incoming.set(edge.target, []);
+    incoming.get(edge.target).push(edge.source);
+  });
+
+  const anchored = new Set(existing);
+  Object.keys(generated || {}).forEach((id) => {
+    if (!incoming.has(id)) anchored.add(id);
+  });
+  const pending = new Set(
+    Object.keys(generated || {}).filter((id) => !existing.has(id) && incoming.has(id))
+  );
+
+  // Translate each new node's topology-aware seed offset to the final
+  // current/saved location of its closest resolved parent. Iteration handles
+  // root -> interface -> transport -> destination chains without returning
+  // descendants to the generated origin.
+  const maxPasses = pending.size + 1;
+  for (let pass = 0; pass < maxPasses && pending.size; pass += 1) {
+    let progressed = false;
+    Array.from(pending).forEach((id) => {
+      const childSeed = (generated || {})[id];
+      if (!childSeed) return;
+      const translated = (incoming.get(id) || []).filter((source) =>
+        anchored.has(source) && positions[source] && (generated || {})[source]
+      ).map((source) => ({
+        x: positions[source].x + childSeed.x - generated[source].x,
+        y: positions[source].y + childSeed.y - generated[source].y,
+      }));
+      if (!translated.length) return;
+      positions[id] = {
+        x: translated.reduce((sum, item) => sum + item.x, 0) / translated.length,
+        y: translated.reduce((sum, item) => sum + item.y, 0) / translated.length,
+      };
+      anchored.add(id);
+      pending.delete(id);
+      progressed = true;
+    });
+    if (!progressed) break;
+  }
+  return positions;
+}
+
+export function radialClusterPosition(
+  anchor, index, baseRadius = 140, spacing = 85, startAngle = Math.PI / 2
+) {
+  // Golden-angle spiral: deterministic, roughly round, and its width grows
+  // with sqrt(count) instead of linearly with the number of siblings.
+  const angle = startAngle + index * Math.PI * (3 - Math.sqrt(5));
+  const radius = baseRadius + spacing * Math.sqrt(index);
+  return {
+    x: anchor.x + Math.cos(angle) * radius,
+    y: anchor.y + Math.sin(angle) * radius,
+  };
+}
+
 export function rememberLivePosition(layout, nodeId, position, pinnedIds) {
   const current = layout || {};
   return {
