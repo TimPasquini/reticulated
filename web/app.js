@@ -46,8 +46,10 @@ const state = {
   liveMap: null,
   liveMapLayers: null,
   liveMapHasInitialView: false,
+  liveMapSignature: null,
   liveLayoutPending: true,
   liveLayoutRunning: false,
+  liveGraphSignature: null,
   liveSlots: {},
   liveNextSlot: {},
   livePinned: new Set(),
@@ -468,6 +470,32 @@ function liveRenderModel(snapshot) {
       unknown_hops: unknownHops,
     });
   }
+  if (state.showLiveDestinationSummaries) {
+    for (const provided of snapshot.path_groups || []) {
+      if (destinationNodes.some((entry) => entry.item.id === provided.id)) continue;
+      const exactHops = provided.hop_tier === "unknown" || provided.hop_tier === "4+" ? null : Number(provided.hop_tier);
+      const totalHops = provided.hop_tier === "unknown" ? "unknown hops" : provided.hop_tier + " hop" + (provided.hop_tier === "1" ? "" : "s") + " total";
+      const unknownHops = provided.hop_tier === "unknown" ? "unknown" : (provided.hop_tier === "4+" ? "3+" : Math.max(0, exactHops - 1));
+      const group = {
+        ...provided,
+        hops: exactHops,
+        unknown_hops: unknownHops,
+        label: provided.count.toLocaleString() + " destinations\n" + totalHops +
+          (provided.reporter_label ? " from " + provided.reporter_label : ""),
+      };
+      destinationNodes.push({ kind: "destination_group", item: group });
+      pathEdges.push({
+        id: "edge:" + provided.source + ":" + provided.id,
+        source: provided.source,
+        target: provided.id,
+        kind: "known_path",
+        certainty: provided.hop_tier === "1" ? "observed" : "incomplete",
+        hops: exactHops,
+        hop_tier: provided.hop_tier,
+        unknown_hops: unknownHops,
+      });
+    }
+  }
   const rmapItems = snapshot.rmap_interfaces || [];
   const observedTransportIds = new Set((snapshot.transports || []).map((item) => String(item.hash)));
   (snapshot.reporter_roots || [snapshot.root]).forEach((root) => {
@@ -497,6 +525,32 @@ function liveRenderModel(snapshot) {
     rmapInterfaceMatches: rmapInterfaceMatches,
     unmatchedRmapCount: unmatchedRmapCount,
   };
+}
+
+function liveGraphSignature(snapshot, renderModel) {
+  const roots = snapshot.reporter_roots || [snapshot.root];
+  const transportCounts = (snapshot.path_summary || {}).by_transport || {};
+  return JSON.stringify({
+    roots: roots.map((item) => [item.id, item.label, item.primary, item.report_stale]),
+    interfaces: (snapshot.interfaces || []).map((item) => [
+      item.id, item.display_name || item.short_name || item.name, item.status,
+      item.parent_interface_id,
+    ]),
+    transports: (snapshot.transports || []).map((item) => [
+      item.id, item.hash, transportCounts[item.hash] || 0, item.announce_inferred,
+    ]),
+    destinations: renderModel.destinationNodes.map((entry) => [
+      entry.kind, entry.item.id, entry.item.label, entry.item.count,
+      entry.item.hops, entry.item.unknown_hops,
+    ]),
+    edges: renderModel.edges.map((edge) => [
+      edge.id, edge.source, edge.target, edge.kind, edge.certainty,
+      edge.hops, edge.unknown_hops, edge.route_conflict,
+    ]),
+    rmapMatches: (snapshot.rmap_matches || []).map((item) => [
+      item.interface_id, item.rmap_interface_id, item.transport_id,
+    ]),
+  });
 }
 
 function livePositions(snapshot, renderModel) {
@@ -774,6 +828,19 @@ function renderLiveMap(snapshot) {
     summary.textContent = "Map library could not be loaded.";
     return;
   }
+  const mapSignature = JSON.stringify({
+    records: (snapshot.rmap_interfaces || []).map((item) => [
+      item.id, item.transport_id, item.latitude, item.longitude, item.hops, item.status,
+    ]),
+    matches: (snapshot.rmap_matches || []).map((item) => [
+      item.interface_id, item.transport_id, item.latitude, item.longitude,
+    ]),
+    attachments: (snapshot.rmap_attachments || []).map((item) => [
+      item.source, item.target, item.interface_online,
+    ]),
+  });
+  if (mapSignature === state.liveMapSignature) return;
+  state.liveMapSignature = mapSignature;
   state.liveMapLayers.clearLayers();
   const roots = snapshot.reporter_roots || [snapshot.root];
   const rootIds = new Set(roots.map((root) => String(root.transport_id || "")));
@@ -910,6 +977,15 @@ function rebuildLive(snapshot) {
   cy.nodes().forEach((node) => { oldPositions[node.id()] = { ...node.position() }; });
   const selectedIds = cy.$(":selected").map((element) => element.id());
   const renderModel = liveRenderModel(snapshot);
+  const graphSignature = liveGraphSignature(snapshot, renderModel);
+  if (hadLiveGraph && graphSignature === state.liveGraphSignature) {
+    const freshItems = new Map();
+    renderModel.destinationNodes.forEach((entry) => freshItems.set(entry.item.id, entry.item));
+    cy.nodes("[liveKind]").forEach((node) => {
+      if (freshItems.has(node.id())) node.data("item", freshItems.get(node.id()));
+    });
+    return;
+  }
   const positions = livePositions(snapshot, renderModel);
   const savedPositions = (state.liveSavedLayout || {}).positions || {};
   Object.keys(savedPositions).forEach((id) => { positions[id] = savedPositions[id]; });
@@ -1015,10 +1091,13 @@ function rebuildLive(snapshot) {
     });
   }
   cy.add(els);
+  state.liveGraphSignature = graphSignature;
   applyLivePins();
   const hasSavedPositions = Object.keys(savedPositions).length > 0;
-  const newNodesNeedAnchoring = state.livePinned.size > 0 && cy.nodes("[liveKind]").some((node) => !savedPositions[node.id()]);
-  const shouldAutoLayout = state.liveLayoutPending || (!hadLiveGraph && !hasSavedPositions) || newNodesNeedAnchoring;
+  // Newly received announces must not launch the force solver every poll.
+  // Their deterministic seed positions are immediately usable; users can run
+  // Layout explicitly when they want a global refinement.
+  const shouldAutoLayout = state.liveLayoutPending || (!hadLiveGraph && !hasSavedPositions);
   if (hadLiveGraph && !shouldAutoLayout) {
     cy.zoom(oldZoom);
     cy.pan(oldPan);
@@ -1073,7 +1152,6 @@ async function loadLiveState() {
     if (!state.liveReporterId) return;
     await ensureLiveLayoutScope(state.liveReporterId);
     const query = new URLSearchParams();
-    if (state.showLiveDestinationSummaries) query.set("include_paths", "true");
     if (state.showLiveRmap || state.liveView === "map") query.set("include_rmap", "true");
     const endpoint = state.liveReporterId === "all"
       ? "/api/live/network"
@@ -1727,7 +1805,7 @@ cy.on("tap", "node.host", (e) => {
 });
 
 cy.on("tap", "node.medium", (e) => { showPanel(e.target); });
-cy.on("tap", "node.live-root, node.live-interface, node.live-transport, node.live-rmap-transport, node.live-rmap-interface, node.live-rmap-group, node.live-destination, node.live-destination-group", (e) => {
+cy.on("tap", "node[liveKind]", (e) => {
   showPanel(e.target);
   updateLivePinButton();
 });
@@ -1764,10 +1842,12 @@ document.getElementById("live-reporter").onchange = (event) => {
   state.liveReporterId = event.target.value;
   state.live = null;
   state.liveLayoutPending = true;
+  state.liveGraphSignature = null;
   state.liveLayoutScope = null;
   state.liveSavedLayout = null;
   state.livePinned = new Set();
   state.liveMapHasInitialView = false;
+  state.liveMapSignature = null;
   cy.elements().remove();
   loadLiveState();
 };
@@ -2050,6 +2130,9 @@ setupHold(document.getElementById("btn-reset"), 3000, () => api.post("/api/reset
 function runLiveLayout(animate) {
   if (!state.live || !cy.nodes().length || state.liveLayoutRunning) return;
   state.liveLayoutRunning = true;
+  const startedAt = performance.now();
+  const nodeCount = cy.nodes().length;
+  const edgeCount = cy.edges().length;
   applyLivePins();
   const fixedNodeConstraint = cy.nodes("[liveKind]").filter((node) =>
     state.livePinned.has(node.id())
@@ -2057,6 +2140,28 @@ function runLiveLayout(animate) {
   fixedNodeConstraint.forEach((constraint) => {
     cy.getElementById(constraint.nodeId).lock();
   });
+
+  const finish = (strategy) => {
+    state.liveLayoutRunning = false;
+    state.liveLayoutPending = false;
+    applyLivePins();
+    scheduleLiveAutosave();
+    console.info(
+      "Reticulated layout profile:", strategy,
+      nodeCount + " nodes,", edgeCount + " edges,",
+      Math.round(performance.now() - startedAt) + "ms"
+    );
+  };
+
+  // Force-directed layouts become disproportionately expensive once announce
+  // enrichment grows into the hundreds or thousands. The graph already has deterministic
+  // topology-aware seed positions, so preserve them and fit the viewport.
+  if (nodeCount > 400) {
+    cy.nodes("[liveKind]").unlock();
+    cy.fit(cy.elements(), 70);
+    finish("seeded positions (force layout skipped)");
+    return;
+  }
 
   // Pass 1 uses fCoSE's spectral stage to quickly pull apart the hand-seeded
   // rows and give the force solver a topology-aware starting point.
@@ -2096,10 +2201,7 @@ function runLiveLayout(animate) {
       minTemp: 1,
     });
     refine.one("layoutstop", () => {
-      state.liveLayoutRunning = false;
-      state.liveLayoutPending = false;
-      applyLivePins();
-      scheduleLiveAutosave();
+      finish("fCoSE + CoSE");
     });
     refine.run();
   });

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .announce_store import AnnounceEventStore
-from .live_rns import topology_snapshot
+from .live_rns import _path_groups, topology_snapshot
 
 
 REPORTER_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -92,7 +92,11 @@ class LiveReportRegistry:
             "reporter_id": reporter_id,
             "received_at": received_at if received_at is not None else time.time(),
             "local": local,
-            "snapshot": json.loads(json.dumps(snapshot)),
+            # Collectors and request decoders hand ownership of a newly built
+            # snapshot to the registry and never mutate it afterward. Avoid a
+            # JSON round-trip of the complete path table on every report; a
+            # Patroon-sized snapshot is more than 12 MB before compression.
+            "snapshot": snapshot,
         }
         if self.announce_store is not None:
             self.announce_store.ingest(reporter_id, snapshot.get("announces"))
@@ -300,6 +304,7 @@ class LiveReportRegistry:
         services_by_destination: dict[str, list[dict[str, Any]]] = {}
         edges: list[dict[str, Any]] = []
         destination_candidates: dict[str, tuple[tuple[Any, ...], dict[str, Any], dict[str, Any]]] = {}
+        path_group_candidates: dict[str, tuple[tuple[Any, ...], dict[str, Any], dict[str, Any]]] = {}
         path_summary_candidates: dict[str, tuple[tuple[Any, ...], str | None]] = {}
         reporter_metadata: list[dict[str, Any]] = []
         reporter_health: dict[str, dict[str, Any]] = {}
@@ -465,24 +470,44 @@ class LiveReportRegistry:
                             score,
                             str(destination.get("via")) if destination.get("via") else None,
                         )
+                    merged_destination_id = f"reporter:{reporter_id}:destination:{destination_hash}"
+                    group_destination = {
+                        "id": merged_destination_id,
+                        "hash": destination.get("hash"),
+                        "hops": destination.get("hops"),
+                        "interface_id": id_map.get(destination.get("interface_id"), destination.get("interface_id")),
+                        "interface": destination.get("interface"),
+                        "reporter_id": reporter_id,
+                        "reporter_label": metadata["label"],
+                    }
+                    group_edge = {
+                        "kind": "known_path",
+                        "hops": edge.get("hops"),
+                        "source": id_map.get(edge.get("source"), edge.get("source")),
+                        "target": merged_destination_id,
+                    }
+                    current_group = path_group_candidates.get(destination_hash)
+                    if current_group is None or score < current_group[0]:
+                        path_group_candidates[destination_hash] = (
+                            score, group_destination, group_edge
+                        )
                     if (
                         not include_paths
                         and not destination.get("local")
                         and destination_hash.lower() not in services_by_destination
                     ):
                         continue
-                    merged_destination_id = f"reporter:{reporter_id}:destination:{destination_hash}"
                     candidate_destination = {
                         **destination,
                         "id": merged_destination_id,
-                        "interface_id": id_map.get(destination.get("interface_id"), destination.get("interface_id")),
+                        "interface_id": group_destination["interface_id"],
                         "reporter_id": reporter_id,
                         "reporter_label": metadata["label"],
                     }
                     candidate_edge = {
                         **edge,
                         "id": f"reporter:{reporter_id}:{edge['id']}",
-                        "source": id_map.get(edge.get("source"), edge.get("source")),
+                        "source": group_edge["source"],
                         "target": merged_destination_id,
                         "reporter_id": reporter_id,
                     }
@@ -574,6 +599,12 @@ class LiveReportRegistry:
                 "destination_count": len(path_summary_candidates),
                 "by_transport": counts_by_transport,
             }
+            group_destinations = []
+            group_edges = []
+            for _, destination, edge in path_group_candidates.values():
+                group_destinations.append(destination)
+                group_edges.append(edge)
+            merged["_path_groups"] = _path_groups(group_destinations, group_edges)
         projected = topology_snapshot(
             merged, include_paths=include_paths, include_rmap=include_rmap,
             include_announces=include_announces,

@@ -337,6 +337,8 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(compact["destinations"], [])
         self.assertEqual(compact["path_summary"]["destination_count"], 1)
         self.assertEqual(compact["path_summary"]["by_transport"], {"backbone-hop": 1})
+        self.assertEqual(len(compact["path_groups"]), 1)
+        self.assertEqual(compact["path_groups"][0]["count"], 1)
 
     def test_connected_transport_reporter_refines_primary_path(self):
         patroon = snapshot("Patroon", transport_id="patroon", observed=("vehicle",))

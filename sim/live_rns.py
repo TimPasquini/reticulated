@@ -174,6 +174,23 @@ def _announce_graph_enrichment(
     }
     default_root = state.get("root", {})
     interfaces = state.get("interfaces", [])
+    interface_by_reporter_name: dict[tuple[str | None, str], dict[str, Any]] = {}
+    interface_by_name: dict[str, dict[str, Any]] = {}
+    for interface in interfaces:
+        candidates = interface.get("observations")
+        if not isinstance(candidates, list) or not candidates:
+            candidates = [interface]
+        for candidate in candidates:
+            candidate_reporter = candidate.get("reporter_id")
+            for key in ("name", "short_name", "display_name"):
+                if not candidate.get(key):
+                    continue
+                name = str(candidate[key])
+                interface_by_name.setdefault(name, interface)
+                interface_by_reporter_name.setdefault(
+                    (str(candidate_reporter) if candidate_reporter else None, name),
+                    interface,
+                )
     destinations_by_hash = {
         str(item.get("hash") or "").lower(): item
         for item in destinations if item.get("hash")
@@ -181,6 +198,12 @@ def _announce_graph_enrichment(
     transports_by_id = {item.get("id"): item for item in transports}
     root_ids = {root.get("id") for root in roots}
     edge_pairs = {(edge.get("source"), edge.get("target")) for edge in edges}
+    current_path_keys = {
+        (edge.get("source"), edge.get("target"), edge.get("hops"))
+        for edge in edges
+        if edge.get("kind") == "known_path"
+        and edge.get("evidence") != "received_announce"
+    }
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     for event in announce_events:
@@ -210,21 +233,11 @@ def _announce_graph_enrichment(
         if not interface_name:
             return None
         wanted = str(interface_name)
-        for interface in interfaces:
-            candidates = interface.get("observations")
-            if not isinstance(candidates, list) or not candidates:
-                candidates = [interface]
-            for candidate in candidates:
-                if reporter_id and candidate.get("reporter_id") != reporter_id:
-                    continue
-                names = {
-                    str(candidate.get(key))
-                    for key in ("name", "short_name", "display_name")
-                    if candidate.get(key)
-                }
-                if wanted in names:
-                    return interface
-        return None
+        if reporter_id:
+            matched = interface_by_reporter_name.get((str(reporter_id), wanted))
+            if matched is not None:
+                return matched
+        return interface_by_name.get(wanted)
 
     for destination_hash, events in grouped.items():
         all_observations = [item for event in events for item in observations(event)]
@@ -386,14 +399,7 @@ def _announce_graph_enrichment(
             else:
                 unknown_hops = max(0, hops - 1) if hops is not None else None
 
-            duplicate = any(
-                edge.get("target") == destination["id"]
-                and edge.get("source") == source_id
-                and edge.get("hops") == hops
-                and edge.get("evidence") != "received_announce"
-                for edge in edges
-            )
-            if duplicate:
+            if (source_id, destination["id"], hops) in current_path_keys:
                 continue
             fragment = _stable_fragment("|".join(str(item) for item in route_key))
             edges.append({
@@ -418,6 +424,52 @@ def _announce_graph_enrichment(
             edge_pairs.add((source_id, destination["id"]))
 
 
+def _path_groups(
+    destinations: list[dict[str, Any]], edges: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Aggregate ordinary path-table fan-out into compact display groups."""
+    destination_by_id = {
+        item.get("id"): item for item in destinations if item.get("id")
+    }
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for edge in edges:
+        if edge.get("kind") != "known_path":
+            continue
+        destination = destination_by_id.get(edge.get("target"))
+        if not destination or destination.get("local") or destination.get("local_service"):
+            continue
+        if destination.get("announced"):
+            continue
+        hops = _as_int(edge.get("hops"))
+        hop_tier = "unknown" if hops is None else ("4+" if hops >= 4 else str(hops))
+        key = (
+            edge.get("source"), destination.get("interface_id"), hop_tier,
+            destination.get("reporter_id"),
+        )
+        group = groups.get(key)
+        if group is None:
+            group_id = "destination-group:" + "|".join(str(item) for item in key)
+            group = {
+                "id": group_id,
+                "source": edge.get("source"),
+                "interface_id": destination.get("interface_id"),
+                "interface": destination.get("interface"),
+                "reporter_id": destination.get("reporter_id"),
+                "reporter_label": destination.get("reporter_label"),
+                "hop_tier": hop_tier,
+                "count": 0,
+                "hop_distribution": {},
+                "sample_hashes": [],
+            }
+            groups[key] = group
+        group["count"] += 1
+        exact = "unknown" if hops is None else str(hops)
+        group["hop_distribution"][exact] = group["hop_distribution"].get(exact, 0) + 1
+        if len(group["sample_hashes"]) < 100 and destination.get("hash"):
+            group["sample_hashes"].append(destination["hash"])
+    return list(groups.values())
+
+
 def topology_snapshot(
     source: dict[str, Any], *, include_paths: bool = False, include_rmap: bool = False,
     include_announces: bool = False,
@@ -428,6 +480,7 @@ def topology_snapshot(
     # of path dictionaries on every five-second API poll.
     state = dict(source)
     destinations = state.get("destinations", [])
+    source_edges = state.get("edges", [])
     counts_by_transport: dict[str, int] = {}
     for destination in destinations:
         via = destination.get("via")
@@ -439,6 +492,12 @@ def topology_snapshot(
         "destination_count": len(destinations),
         "by_transport": counts_by_transport,
     }
+    provided_path_groups = state.pop("_path_groups", None)
+    state["path_groups"] = (
+        provided_path_groups
+        if provided_path_groups is not None
+        else _path_groups(destinations, source_edges)
+    )
     local_destinations = [item for item in destinations if item.get("local")]
     service_destinations = [
         item for item in destinations if item.get("local") or item.get("local_service")
@@ -590,6 +649,8 @@ class LiveRNSProvider:
         rnpath_path: str | None = None,
         config_dir: str | None = None,
         announce_capture: AnnounceCapture | None = None,
+        path_interval: float | None = None,
+        rmap_interval: float | None = None,
     ) -> None:
         self.label = label or config.LIVE_RNS_LABEL
         self.timeout = timeout if timeout is not None else config.LIVE_RNS_TIMEOUT
@@ -598,10 +659,20 @@ class LiveRNSProvider:
         self.rnpath_path = rnpath_path or config.RNPATH_PATH
         self.config_dir = config_dir if config_dir is not None else config.LIVE_RNS_CONFIG_DIR
         self.announce_capture = announce_capture
+        self.path_interval = max(
+            0.0,
+            path_interval if path_interval is not None else config.LIVE_RNS_PATH_INTERVAL,
+        )
+        self.rmap_interval = max(
+            0.0,
+            rmap_interval if rmap_interval is not None else config.LIVE_RNS_RMAP_INTERVAL,
+        )
         self._lock = threading.Lock()
         self._last_status: dict[str, Any] | None = None
         self._last_paths: list[dict[str, Any]] | None = None
+        self._last_path_poll = 0.0
         self._last_discovered: list[dict[str, Any]] | None = None
+        self._last_rmap_poll = 0.0
         self._registered_services: dict[str, dict[str, Any]] = {}
         self._state = self._empty_state()
 
@@ -672,10 +743,34 @@ class LiveRNSProvider:
         """Collect both sources; retain each source's last good value on failure."""
         status, status_health = self._read_json(self._command(self.rnstatus_path, "-j"))
         if status_health["ok"]:
-            paths, path_health = self._read_json(self._command(self.rnpath_path, "-t", "-j"))
-            discovered, rmap_health = self._read_json(
-                self._command(self.rnstatus_path, "-d", "-j")
-            )
+            path_age = time.monotonic() - self._last_path_poll
+            if self._last_paths is None or path_age >= self.path_interval:
+                paths, path_health = self._read_json(
+                    self._command(self.rnpath_path, "-t", "-j")
+                )
+            else:
+                paths = self._last_paths
+                path_health = {
+                    "ok": True,
+                    "error": None,
+                    "cached": True,
+                    "age_seconds": round(path_age, 1),
+                    "duration_ms": 0,
+                }
+            rmap_age = time.monotonic() - self._last_rmap_poll
+            if self._last_discovered is None or rmap_age >= self.rmap_interval:
+                discovered, rmap_health = self._read_json(
+                    self._command(self.rnstatus_path, "-d", "-j")
+                )
+            else:
+                discovered = self._last_discovered
+                rmap_health = {
+                    "ok": True,
+                    "error": None,
+                    "cached": True,
+                    "age_seconds": round(rmap_age, 1),
+                    "duration_ms": 0,
+                }
         else:
             # Unlike rnstatus, rnpath can create a standalone RNS instance when
             # no shared daemon exists. Do not let an observational poller claim
@@ -705,11 +800,15 @@ class LiveRNSProvider:
                 path_health = {"ok": False, "error": "expected a JSON array of path objects"}
             else:
                 self._last_paths = paths
+                if not path_health.get("cached"):
+                    self._last_path_poll = time.monotonic()
         if rmap_health["ok"]:
             if not isinstance(discovered, list) or not all(isinstance(item, dict) for item in discovered):
                 rmap_health = {"ok": False, "error": "expected a JSON array of discovered interface objects"}
             else:
                 self._last_discovered = discovered
+                if not rmap_health.get("cached"):
+                    self._last_rmap_poll = time.monotonic()
 
         try:
             local_services, service_errors = discover_local_services(self._last_status or {})

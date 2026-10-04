@@ -276,6 +276,39 @@ class LiveRNSNormalizationTests(unittest.TestCase):
 
 
 class LiveRNSCollectionTests(unittest.TestCase):
+    def test_large_sources_use_independent_cached_refresh_intervals(self):
+        responses = iter([
+            SimpleNamespace(returncode=0, stdout=json.dumps(STATUS), stderr=""),
+            SimpleNamespace(returncode=0, stdout=json.dumps(PATHS), stderr=""),
+            SimpleNamespace(returncode=0, stdout=json.dumps(DISCOVERED), stderr=""),
+            SimpleNamespace(returncode=0, stdout=json.dumps(STATUS), stderr=""),
+        ])
+        commands = []
+
+        def runner(command, timeout):
+            del timeout
+            commands.append(command)
+            return next(responses)
+
+        provider = LiveRNSProvider(
+            runner=runner, path_interval=60, rmap_interval=60
+        )
+        first = provider.collect()
+        second = provider.collect()
+
+        self.assertEqual(first["rmap_interfaces"], second["rmap_interfaces"])
+        self.assertEqual(first["destinations"], second["destinations"])
+        self.assertTrue(second["health"]["rnpath"]["cached"])
+        self.assertTrue(second["health"]["rmap"]["cached"])
+        self.assertEqual(
+            len([command for command in commands if "-t" in command]),
+            1,
+        )
+        self.assertEqual(
+            len([command for command in commands if "-d" in command]),
+            1,
+        )
+
     def test_default_topology_snapshot_omits_destination_fanout(self):
         provider = LiveRNSProvider(label="Patroon")
         provider._state = provider.normalize(
@@ -289,6 +322,11 @@ class LiveRNSCollectionTests(unittest.TestCase):
         self.assertFalse(any(edge["kind"] == "known_path" for edge in topology["edges"]))
         self.assertEqual(topology["path_summary"]["destination_count"], 2)
         self.assertEqual(topology["path_summary"]["by_transport"], {"transport-x": 2})
+        self.assertEqual(len(topology["path_groups"]), 2)
+        self.assertEqual(
+            {group["hop_tier"] for group in topology["path_groups"]},
+            {"1", "4+"},
+        )
         self.assertEqual(topology["rmap_interfaces"], [])
         self.assertEqual(topology["rmap_summary"]["interface_count"], 1)
         self.assertEqual(len(full["destinations"]), 2)

@@ -61,6 +61,10 @@ Optional live-mode settings are:
 - `LIVE_RNS_CONFIG_DIR`: alternate local Reticulum config directory
 - `LIVE_RNS_TIMEOUT`: per-command timeout in seconds (default `3`)
 - `LIVE_RNS_INTERVAL`: backend collection interval in seconds (default `5`)
+- `LIVE_RNS_PATH_INTERVAL`: refresh interval for the full path table (default
+  `10`; cached paths are reused between polls)
+- `LIVE_RNS_RMAP_INTERVAL`: refresh interval for the slower RMAP discovery
+  command (default `60`; cached discovery data remains available between polls)
 - `LIVE_RNS_REPORTER_ID`: stable ID for this server's local report
 - `LIVE_REPORT_CACHE_FILE`: persistent latest-report cache, including complete
   path and RMAP data
