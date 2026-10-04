@@ -215,6 +215,67 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(historical_edge["target"], "transport:patroon-hash")
         self.assertEqual(historical_edge["reporter_id"], "fedora")
 
+    def test_announce_hop_delta_becomes_explicit_route_uncertainty(self):
+        destination_hash = "d" * 32
+        patroon = snapshot("Patroon", transport_id="patroon-hash")
+        patroon["interfaces"] = [{"id": "interface:backbone", "name": "Backbone"}]
+        patroon["edges"] = [{
+            "id": "edge:root:backbone",
+            "source": patroon["root"]["id"],
+            "target": "interface:backbone",
+            "kind": "observed_interface",
+        }]
+        patroon["announces"] = {
+            "active": True,
+            "events": [{
+                "id": "packet-patroon",
+                "received_at": 101.0,
+                "destination_hash": destination_hash,
+                "identity_hash": "i" * 32,
+                "aspect": "lxmf.delivery",
+                "route_hops": 1,
+                "route_interface": "Backbone",
+            }],
+        }
+        fedora = snapshot("Fedora")
+        fedora["interfaces"] = [{"id": "interface:lan", "name": "Garage LAN"}]
+        fedora["edges"] = [{
+            "id": "edge:root:lan",
+            "source": fedora["root"]["id"],
+            "target": "interface:lan",
+            "kind": "observed_interface",
+        }]
+        fedora["announces"] = {
+            "active": True,
+            "events": [{
+                "id": "packet-fedora",
+                "received_at": 100.0,
+                "destination_hash": destination_hash,
+                "identity_hash": "i" * 32,
+                "aspect": "lxmf.delivery",
+                "route_hops": 3,
+                "route_via": "patroon-hash",
+                "route_interface": "Garage LAN",
+            }],
+        }
+
+        registry = LiveReportRegistry()
+        registry.update("patroon", patroon, local=True)
+        registry.update("fedora", fedora)
+        network = registry.network()
+
+        conflicting = next(
+            edge for edge in network["edges"]
+            if edge.get("evidence") == "received_announce"
+            and edge.get("reporter_id") == "fedora"
+        )
+        self.assertTrue(conflicting["route_conflict"])
+        self.assertEqual(conflicting["stitched_via_reporter"], "patroon")
+        self.assertEqual(conflicting["expected_hops"], 2)
+        self.assertEqual(conflicting["hops"], 3)
+        self.assertEqual(conflicting["hop_delta"], 1)
+        self.assertEqual(conflicting["unknown_hops"], 1)
+
     def test_network_unifies_reporter_roots_and_keeps_closest_path_observation(self):
         fedora = snapshot("Fedora", observed=("patroon-hash",))
         fedora["interfaces"] = [

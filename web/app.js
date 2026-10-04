@@ -218,6 +218,13 @@ const cy = cytoscape({
       "background-color": "#705724", "border-color": "#e4b84a", "border-width": 3,
       "color": "#fff0bd", "text-max-width": 120,
     }},
+    { selector: "node.live-ghost", style: {
+      "shape": "round-hexagon", "width": 92, "height": 54,
+      "background-color": "#382f45", "border-color": "#bb86d9", "border-width": 3,
+      "border-style": "dashed", "color": "#eadcf4", "label": "data(label)",
+      "text-valign": "center", "text-halign": "center", "font-size": 9,
+      "text-wrap": "wrap", "text-max-width": 86,
+    }},
     { selector: "node.live-destination-group", style: {
       "shape": "round-rectangle", "width": 130, "height": 48, "background-color": "#6d542a",
       "label": "data(label)", "color": "#ffe4ae", "text-valign": "center", "text-halign": "center",
@@ -311,6 +318,10 @@ function liveInterfaceClass(item) {
 }
 
 function liveEdgeLabel(edge) {
+  if (edge.kind === "unknown_segment") {
+    if (edge.route_conflict && !(edge.unknown_hops > 0)) return "conflicting hop observations";
+    return edge.unknown_hops + " required unknown hop" + (edge.unknown_hops === 1 ? "" : "s");
+  }
   if (edge.kind !== "known_path") return "";
   if (edge.hop_tier === "4+") return "… 3+ unknown hops …";
   if (edge.hop_tier === "unknown") return "unknown path length";
@@ -330,10 +341,40 @@ function liveHopClass(hops, hopTier) {
 function liveRenderModel(snapshot) {
   const destinationById = {};
   (snapshot.destinations || []).forEach((item) => { destinationById[item.id] = item; });
+  const announceDisplayByDestination = {};
+  const announceGroups = new Map();
+  (snapshot.destinations || []).filter((item) => item.announced).forEach((item) => {
+    const key = item.announce_identity_hash ? "identity:" + item.announce_identity_hash : "destination:" + item.hash;
+    if (!announceGroups.has(key)) announceGroups.set(key, []);
+    announceGroups.get(key).push(item);
+  });
+  for (const [key, items] of announceGroups) {
+    let display = items[0];
+    if (key.startsWith("identity:")) {
+      const identityHash = key.slice("identity:".length);
+      const routes = items.flatMap((item) => item.announce_routes || []);
+      const hopValues = routes.map((route) => Number(route.hops)).filter(Number.isFinite);
+      display = {
+        ...items[0],
+        id: "announce-identity:" + identityHash,
+        hash: identityHash,
+        announce_identity: true,
+        identity_hash: identityHash,
+        destination_hashes: Array.from(new Set(items.map((item) => item.hash))).sort(),
+        announce_aspects: Array.from(new Set(items.flatMap((item) => item.announce_aspects || []))).sort(),
+        announce_observed_by: Array.from(new Set(items.flatMap((item) => item.announce_observed_by || []))).sort(),
+        announce_count: items.reduce((sum, item) => sum + Number(item.announce_count || 0), 0),
+        announce_routes: routes,
+        hops: hopValues.length ? Math.min(...hopValues) : null,
+      };
+    }
+    items.forEach((item) => { announceDisplayByDestination[item.id] = display; });
+  }
   const buckets = new Map();
   const observedEdges = [];
   const destinationNodes = [];
   const pathEdges = [];
+  const addedDestinationNodes = new Set();
   for (const edge of snapshot.edges || []) {
     if (edge.kind !== "known_path") { observedEdges.push(edge); continue; }
     const destination = destinationById[edge.target];
@@ -344,8 +385,32 @@ function liveRenderModel(snapshot) {
       continue;
     }
     if (destination.announced) {
-      destinationNodes.push({ kind: "announced_destination", item: destination });
-      pathEdges.push(edge);
+      const display = announceDisplayByDestination[destination.id] || destination;
+      if (!addedDestinationNodes.has(display.id)) {
+        destinationNodes.push({ kind: display.announce_identity ? "announced_identity" : "announced_destination", item: display });
+        addedDestinationNodes.add(display.id);
+      }
+      if ((edge.unknown_hops > 0) || edge.route_conflict) {
+        const ghostId = "ghost-segment:" + edge.id;
+        const ghost = {
+          id: ghostId,
+          unknown_hops: edge.unknown_hops,
+          route_conflict: edge.route_conflict,
+          hop_delta: edge.hop_delta,
+          expected_hops: edge.expected_hops,
+          observed_hops: edge.hops,
+          reporter_id: edge.reporter_id,
+          destination_hash: destination.hash,
+          label: edge.route_conflict
+            ? ((edge.unknown_hops > 0 ? edge.unknown_hops + " unexplained hop" + (edge.unknown_hops === 1 ? "" : "s") : "conflicting hop counts") + "\nroute uncertainty")
+            : edge.unknown_hops + " unknown intermediate\nhop" + (edge.unknown_hops === 1 ? "" : "s"),
+        };
+        destinationNodes.push({ kind: "ghost_segment", item: ghost });
+        pathEdges.push({ ...edge, id: edge.id + ":unknown", target: ghostId, kind: "unknown_segment" });
+        pathEdges.push({ ...edge, id: edge.id + ":completion", source: ghostId, target: display.id, kind: "ghost_completion", hops: 1, unknown_hops: 0 });
+      } else {
+        pathEdges.push({ ...edge, target: display.id });
+      }
       continue;
     }
     if (!state.showLiveDestinationSummaries) continue;
@@ -511,7 +576,9 @@ function livePositions(snapshot, renderModel) {
   // A path entry tells us the first transport and total hop count, but not the
   // intervening routers. Place aggregates in hop-depth bands without inventing
   // those routers. Four-or-more-hop paths share a deep-mesh band.
-  const pathEdges = renderModel.edges.filter((edge) => edge.kind === "known_path");
+  const pathEdges = renderModel.edges.filter((edge) =>
+    edge.kind === "known_path" || edge.kind === "unknown_segment" || edge.kind === "ghost_completion"
+  );
   const destinationsBySource = new Map();
   pathEdges.forEach((edge) => {
     if (!destinationsBySource.has(edge.source)) destinationsBySource.set(edge.source, []);
@@ -927,13 +994,19 @@ function rebuildLive(snapshot) {
       const aspect = item.announce_aspect || "unclassified announce";
       const hops = item.hops === null || item.hops === undefined ? "unknown route" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
       els.push({ group: "nodes", data: { id: item.id, label: aspect + "\n" + shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination announced", position: positions[item.id] });
+    } else if (entry.kind === "announced_identity") {
+      const services = (item.destination_hashes || []).length;
+      const aspect = (item.announce_aspects || []).join(", ") || "announced identity";
+      els.push({ group: "nodes", data: { id: item.id, label: aspect + "\nidentity " + shortHash(item.identity_hash) + "\n" + services + " destination" + (services === 1 ? "" : "s"), liveKind: "announce_identity", item: item }, classes: "live-destination announced", position: positions[item.id] });
+    } else if (entry.kind === "ghost_segment") {
+      els.push({ group: "nodes", data: { id: item.id, label: item.label, liveKind: "ghost_segment", item: item }, classes: "live-ghost", position: positions[item.id] });
     } else {
       const hops = item.hops === null || item.hops === undefined ? "? hops" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
       els.push({ group: "nodes", data: { id: item.id, label: shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination", position: positions[item.id] });
     }
   }
   for (const edge of renderModel.edges) {
-    const incomplete = edge.certainty === "incomplete";
+    const incomplete = edge.certainty === "incomplete" || edge.kind === "unknown_segment" || edge.kind === "ghost_completion";
     const historical = edge.certainty === "historical_observation";
     els.push({
       group: "edges",
@@ -1067,7 +1140,8 @@ function showLivePanel(el) {
     title.textContent = "Live RNS details";
     body.innerHTML = '<div class="muted">Read-only local Reticulum observations. Select an item for details.</div>' +
       '<div class="live-key"><span class="live-swatch"></span><span class="muted">solid: directly supported relationship</span>' +
-      '<span class="live-swatch incomplete"></span><span class="muted">dashed: unknown intermediate hops</span></div>';
+      '<span class="live-swatch incomplete"></span><span class="muted">dashed: unknown intermediate hops</span>' +
+      '<span class="muted">ghost nodes: required but unidentified topology</span></div>';
     return;
   }
   const item = el.data("item") || {};
@@ -1150,6 +1224,19 @@ function showLivePanel(el) {
       (item.announced ? row("Announce aspect", item.announce_aspect) + row("Announces captured", item.announce_count) +
         row("Observed by", (item.announce_observed_by || []).join(", ")) + row("Last announced", item.announce_received_at) +
         '<div class="muted">This node is backed by a received announce. Dashed route segments preserve unknown intermediate hops.</div>' : "");
+  } else if (kind === "announce_identity") {
+    const hashes = (item.destination_hashes || []).map((hash) => '<div class="mono">' + escapeHtml(hash) + "</div>").join("");
+    title.textContent = "Announced Reticulum identity";
+    body.innerHTML = row("Identity hash", item.identity_hash) + row("Aspects", (item.announce_aspects || []).join(", ")) +
+      row("Observed by", (item.announce_observed_by || []).join(", ")) + row("Announces captured", item.announce_count) +
+      '<details class="section" open><summary>Destination hashes</summary><div class="destination-hashes">' + hashes + "</div></details>" +
+      '<div class="muted">These destinations are grouped because their announces carry the same identity hash.</div>';
+  } else if (kind === "ghost_segment") {
+    title.textContent = "Unknown topology segment";
+    body.innerHTML = row("Required unknown hops", item.unknown_hops) + row("Reporter", item.reporter_id) +
+      row("Observed total hops", item.observed_hops) + row("Expected stitched hops", item.expected_hops) +
+      row("Hop-count delta", item.hop_delta) + row("Destination", item.destination_hash) +
+      '<div class="muted">This is not a fabricated router. It represents topology that the observations require but do not identify.</div>';
   }
 }
 

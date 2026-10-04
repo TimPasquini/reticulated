@@ -156,6 +156,15 @@ payloads. Patroon deduplicates every reporter observation into
 `announces.sqlite3`; recent events can be inspected through
 `GET /api/live/announces`.
 
+The combined topology correlates announce destination and identity hashes,
+next-hop transport hashes, reporter transport identities, interfaces and hop
+counts. Shared identities are displayed once with their announced destination
+hashes. When the evidence requires unidentified intermediate topology, the UI
+draws a labelled ghost segment containing the required unknown hop count; it
+does not assign invented hashes or claim false router adjacencies. Conflicting
+hop observations remain visible as route uncertainty instead of silently
+choosing one report.
+
 The reporter gzip-compresses normalized `rnstatus -j`, `rnpath -t -j`,
 `rnstatus -d -j`, and its bounded announce-event buffer inside a versioned RNS request. RNS automatically
 uses a Resource when a snapshot is larger than one packet. The listener accepts

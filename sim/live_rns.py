@@ -168,6 +168,10 @@ def _announce_graph_enrichment(
     root_by_reporter = {
         root.get("reporter_id"): root for root in roots if root.get("reporter_id")
     }
+    reporter_by_transport = {
+        str(root.get("transport_id")): root.get("reporter_id")
+        for root in roots if root.get("transport_id") and root.get("reporter_id")
+    }
     default_root = state.get("root", {})
     interfaces = state.get("interfaces", [])
     destinations_by_hash = {
@@ -247,6 +251,10 @@ def _announce_graph_enrichment(
         aspects = sorted({
             str(event.get("aspect")) for event in events if event.get("aspect")
         })
+        identity_hashes = sorted({
+            str(event.get("identity_hash"))
+            for event in events if event.get("identity_hash")
+        })
         destination = destinations_by_hash.get(destination_hash)
         hops = _as_int(route.get("route_hops"))
         via = route.get("route_via")
@@ -276,59 +284,138 @@ def _announce_graph_enrichment(
             "announce_received_at": received_at(latest),
             "announce_aspect": latest.get("aspect"),
             "announce_aspects": aspects,
-            "announce_identity_hash": latest.get("identity_hash"),
+            "announce_identity_hash": identity_hashes[0] if len(identity_hashes) == 1 else None,
+            "announce_identity_hashes": identity_hashes,
+            "announce_identity_conflict": len(identity_hashes) > 1,
             "announce_app_data": latest.get("app_data_text"),
             "announce_observed_by": observed_by,
         })
 
-        if any(edge.get("target") == destination["id"] for edge in edges):
-            continue
-        source_id = interface.get("id") if interface else root.get("id")
-        if via:
-            transport_id = f"transport:{via}"
-            transport = transports_by_id.get(transport_id)
-            if transport is None and transport_id not in root_ids:
-                transport = {
-                    "id": transport_id,
-                    "hash": via,
-                    "interface_ids": [interface["id"]] if interface else [],
-                    "observed_by": [reporter_id] if reporter_id else [],
-                    "announce_inferred": True,
-                }
-                transports.append(transport)
-                transports_by_id[transport_id] = transport
-            elif (
-                transport is not None
-                and interface
-                and interface["id"] not in transport["interface_ids"]
+        unique_routes: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for observation in all_observations:
+            observation_via = observation.get("route_via")
+            if observation_via and str(observation_via).lower() == destination_hash:
+                observation_via = None
+            route_key = (
+                observation.get("reporter_id"),
+                observation.get("route_interface"),
+                observation_via,
+                _as_int(observation.get("route_hops")),
+            )
+            previous = unique_routes.get(route_key)
+            if previous is None or received_at(observation) > received_at(previous):
+                unique_routes[route_key] = observation
+        destination["announce_routes"] = [
+            {
+                "reporter_id": key[0],
+                "interface": key[1],
+                "via": key[2],
+                "hops": key[3],
+                "received_at": received_at(observation),
+            }
+            for key, observation in unique_routes.items()
+        ]
+
+        routes_by_reporter: dict[str, list[dict[str, Any]]] = {}
+        for observation in unique_routes.values():
+            observation_reporter = observation.get("reporter_id")
+            if observation_reporter:
+                routes_by_reporter.setdefault(str(observation_reporter), []).append(observation)
+
+        for route_key, observation in unique_routes.items():
+            reporter_id = observation.get("reporter_id")
+            hops = _as_int(observation.get("route_hops"))
+            via = route_key[2]
+            interface = matching_interface(reporter_id, observation.get("route_interface"))
+            root = root_by_reporter.get(reporter_id, default_root)
+            source_id = interface.get("id") if interface else root.get("id")
+            if via:
+                transport_id = f"transport:{via}"
+                transport = transports_by_id.get(transport_id)
+                if transport is None and transport_id not in root_ids:
+                    transport = {
+                        "id": transport_id,
+                        "hash": via,
+                        "interface_ids": [interface["id"]] if interface else [],
+                        "observed_by": [reporter_id] if reporter_id else [],
+                        "announce_inferred": True,
+                    }
+                    transports.append(transport)
+                    transports_by_id[transport_id] = transport
+                elif (
+                    transport is not None
+                    and interface
+                    and interface["id"] not in transport["interface_ids"]
+                ):
+                    transport["interface_ids"].append(interface["id"])
+                if interface and (interface["id"], transport_id) not in edge_pairs:
+                    edges.append({
+                        "id": f"edge:announce-next-hop:{interface['id']}:{via}",
+                        "source": interface["id"],
+                        "target": transport_id,
+                        "kind": "announce_next_hop",
+                        "certainty": "historical_observation",
+                        "reporter_id": reporter_id,
+                    })
+                    edge_pairs.add((interface["id"], transport_id))
+                source_id = transport_id
+            if not source_id:
+                continue
+
+            stitched_reporter = reporter_by_transport.get(str(via)) if via else None
+            downstream = routes_by_reporter.get(str(stitched_reporter), [])
+            downstream_hops = [
+                _as_int(item.get("route_hops")) for item in downstream
+                if _as_int(item.get("route_hops")) is not None
+            ]
+            expected_hops = None
+            hop_delta = None
+            if (
+                stitched_reporter
+                and stitched_reporter != reporter_id
+                and hops is not None
+                and downstream_hops
             ):
-                transport["interface_ids"].append(interface["id"])
-            if interface and (interface["id"], transport_id) not in edge_pairs:
-                edges.append({
-                    "id": f"edge:announce-next-hop:{interface['id']}:{via}",
-                    "source": interface["id"],
-                    "target": transport_id,
-                    "kind": "announce_next_hop",
-                    "certainty": "historical_observation",
-                    "reporter_id": reporter_id,
-                })
-                edge_pairs.add((interface["id"], transport_id))
-            source_id = transport_id
-        if not source_id:
-            continue
-        unknown_hops = max(0, hops - 1) if hops is not None else None
-        edges.append({
-            "id": f"edge:announce-path:{source_id}:{destination_hash}",
-            "source": source_id,
-            "target": destination["id"],
-            "kind": "known_path",
-            "certainty": "incomplete" if unknown_hops or hops is None else "observed",
-            "evidence": "received_announce",
-            "hops": hops,
-            "unknown_hops": unknown_hops,
-            "reporter_id": reporter_id,
-        })
-        edge_pairs.add((source_id, destination["id"]))
+                expected_hops = 1 + min(downstream_hops)
+                hop_delta = hops - expected_hops
+                # A consistent farther observation contributes the link to the
+                # known reporter. Its own observation supplies the onward path.
+                if hop_delta == 0:
+                    continue
+                unknown_hops = hop_delta if hop_delta > 0 else None
+            else:
+                unknown_hops = max(0, hops - 1) if hops is not None else None
+
+            duplicate = any(
+                edge.get("target") == destination["id"]
+                and edge.get("source") == source_id
+                and edge.get("hops") == hops
+                and edge.get("evidence") != "received_announce"
+                for edge in edges
+            )
+            if duplicate:
+                continue
+            fragment = _stable_fragment("|".join(str(item) for item in route_key))
+            edges.append({
+                "id": f"edge:announce-path:{fragment}:{destination_hash}",
+                "source": source_id,
+                "target": destination["id"],
+                "kind": "known_path",
+                "certainty": (
+                    "incomplete"
+                    if unknown_hops or hops is None or hop_delta not in (None, 0)
+                    else "observed"
+                ),
+                "evidence": "received_announce",
+                "hops": hops,
+                "unknown_hops": unknown_hops,
+                "reporter_id": reporter_id,
+                "stitched_via_reporter": stitched_reporter,
+                "expected_hops": expected_hops,
+                "hop_delta": hop_delta,
+                "route_conflict": hop_delta is not None and hop_delta != 0,
+            })
+            edge_pairs.add((source_id, destination["id"]))
 
 
 def topology_snapshot(
