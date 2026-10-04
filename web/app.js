@@ -1,5 +1,6 @@
 import {
   anchorNewPositions,
+  captureLayoutState,
   mergeLivePositions,
   pruneLiveLayout,
   radialClusterPosition,
@@ -680,11 +681,12 @@ function captureLiveLayout() {
     const position = node.position();
     positions[node.id()] = { x: position.x, y: position.y };
   });
-  return {
-    positions: positions,
-    pinned: Array.from(state.livePinned).filter((id) => positions[id]).sort(),
-    viewport: { zoom: cy.zoom(), pan: { ...cy.pan() } },
-  };
+  return captureLayoutState(
+    state.liveSavedLayout,
+    positions,
+    state.livePinned,
+    { zoom: cy.zoom(), pan: { ...cy.pan() } },
+  );
 }
 
 function rememberLiveNodePosition(node) {
@@ -707,9 +709,13 @@ async function saveLiveLayout(name, quiet) {
   if (!saved || !saved.positions) return;
   // A slow earlier request must not replace coordinates captured by a later
   // drag, nor install a layout after the user switched reporter scopes.
-  if (generation !== state.liveLayoutSaveGeneration || scope !== liveLayoutScope()) return saved;
-  state.liveSavedLayout = saved;
-  if (!quiet) await refreshLiveLayouts();
+  const currentScope = scope === liveLayoutScope();
+  if (generation === state.liveLayoutSaveGeneration && currentScope) {
+    state.liveSavedLayout = saved;
+  }
+  // Named-layout counts should reflect the completed write even if an
+  // unrelated pan or drag advanced the in-memory save generation meanwhile.
+  if (!quiet && currentScope) await refreshLiveLayouts();
   return saved;
 }
 

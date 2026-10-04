@@ -85,6 +85,23 @@ export function rememberLivePosition(layout, nodeId, position, pinnedIds) {
   };
 }
 
+export function captureLayoutState(layout, visiblePositions, pinnedIds, viewport) {
+  const positions = { ...(visiblePositions || {}) };
+  const previousPositions = (layout || {}).positions || {};
+  const pinned = Array.from(pinnedIds || []).sort();
+  pinned.forEach((id) => {
+    // A pin is durable layout state even when its node is absent from this
+    // particular report. Preserve only pinned background coordinates; stale
+    // unpinned nodes remain eligible for pruning.
+    if (!positions[id] && previousPositions[id]) positions[id] = previousPositions[id];
+  });
+  return {
+    positions: positions,
+    pinned: pinned.filter((id) => positions[id]),
+    viewport: viewport,
+  };
+}
+
 export function pruneLiveLayout(layout, activeIds) {
   if (!layout || !layout.positions) return { layout: layout, changed: false };
   const active = activeIds instanceof Set ? activeIds : new Set(activeIds || []);

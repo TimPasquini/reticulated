@@ -109,7 +109,21 @@ class LiveLayoutStore:
         with self._lock:
             document = self._read()
             document.setdefault("version", 1)
-            document.setdefault("layouts", {}).setdefault(scope, {})[name] = normalized
+            scoped_layouts = document.setdefault("layouts", {}).setdefault(scope, {})
+            existing = scoped_layouts.get(name, {})
+            existing_positions = existing.get("positions", {})
+            retained_pins = set(normalized["pinned"])
+            for node_id in existing.get("pinned", []):
+                # Omitted means not currently visible. A visible intentional
+                # unpin still submits the node's position without its ID in
+                # the pinned list, and therefore does not enter this branch.
+                if node_id not in normalized["positions"] and node_id in existing_positions:
+                    normalized["positions"][node_id] = existing_positions[node_id]
+                    retained_pins.add(node_id)
+            if len(normalized["positions"]) > MAX_LAYOUT_NODES:
+                raise ValueError("live layout positions must be an object of reasonable size")
+            normalized["pinned"] = sorted(retained_pins)
+            scoped_layouts[name] = normalized
             self._write(document)
         return json.loads(json.dumps(normalized))
 

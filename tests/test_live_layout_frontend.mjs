@@ -3,11 +3,32 @@ import test from "node:test";
 
 import {
   anchorNewPositions,
+  captureLayoutState,
   mergeLivePositions,
   pruneLiveLayout,
   radialClusterPosition,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("saving retains coordinates and counts for pins absent from the graph", () => {
+  const captured = captureLayoutState(
+    {
+      positions: {
+        hiddenPin: { x: -700, y: 450 },
+        obsolete: { x: 1, y: 2 },
+      },
+      pinned: ["hiddenPin"],
+    },
+    { visiblePin: { x: 300, y: -200 }, visibleLoose: { x: 20, y: 30 } },
+    new Set(["hiddenPin", "visiblePin"]),
+    { zoom: 1, pan: { x: 0, y: 0 } },
+  );
+
+  assert.deepEqual(captured.pinned, ["hiddenPin", "visiblePin"]);
+  assert.deepEqual(captured.positions.hiddenPin, { x: -700, y: 450 });
+  assert.deepEqual(captured.positions.visiblePin, { x: 300, y: -200 });
+  assert.equal(captured.positions.obsolete, undefined);
+});
 
 test("large sibling sets form a bounded cluster instead of an unbounded row", () => {
   const points = Array.from({ length: 250 }, (_, index) =>

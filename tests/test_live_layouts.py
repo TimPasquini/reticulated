@@ -41,6 +41,28 @@ class LiveLayoutStoreTests(unittest.TestCase):
 
             self.assertEqual([item["name"] for item in store.list("all")], ["Field view"])
 
+    def test_overwrite_retains_absent_pins_but_allows_visible_unpin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LiveLayoutStore(Path(directory) / "layouts.json")
+            store.save("all", "Field view", {
+                "positions": {
+                    "visible": {"x": 10, "y": 20},
+                    "temporarily-absent": {"x": -30, "y": 40},
+                },
+                "pinned": ["visible", "temporarily-absent"],
+            })
+            overwritten = store.save("all", "Field view", {
+                "positions": {"visible": {"x": 50, "y": 60}},
+                "pinned": [],
+            })
+
+        self.assertEqual(overwritten["pinned"], ["temporarily-absent"])
+        self.assertEqual(
+            overwritten["positions"]["temporarily-absent"],
+            {"x": -30.0, "y": 40.0},
+        )
+        self.assertEqual(overwritten["positions"]["visible"], {"x": 50.0, "y": 60.0})
+
     def test_rejects_non_finite_positions_and_unknown_pin_ids(self):
         with self.assertRaises(ValueError):
             validate_layout("all", "bad", {
