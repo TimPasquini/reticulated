@@ -1,6 +1,7 @@
 import {
   anchorNewPositions,
   captureLayoutState,
+  hybridBusPositions,
   mergeLivePositions,
   pruneLiveLayout,
   radialClusterPosition,
@@ -59,6 +60,7 @@ const state = {
   liveMapSignature: null,
   liveLayoutPending: true,
   liveLayoutRunning: false,
+  liveLayoutMode: localStorage.getItem("reticulated.live-layout-mode") || "hybrid_bus",
   liveLoadInFlight: false,
   liveLoadGeneration: 0,
   liveReloadRequested: false,
@@ -284,6 +286,9 @@ const cy = cytoscape({
     { selector: "edge.live-historical", style: {
       "line-color": "#e4b84a", "line-style": "dotted",
       "target-arrow-shape": "triangle", "target-arrow-color": "#e4b84a",
+    }},
+    { selector: "edge.live-layout-bus", style: {
+      "width": 4, "opacity": 0.72, "curve-style": "straight",
     }},
     { selector: "edge.live-discovered:selected", style: { "label": "data(label)" }},
     { selector: "edge.announce-flash", style: { "line-color": "#ffd34d", "width": 5 }},
@@ -2390,8 +2395,32 @@ function runLiveLayout(animate) {
   seeded = anchorNewPositions(
     generated, seeded, pinnedPositions, pinnedPositions, renderModel.edges
   );
-  cy.nodes("[liveKind]").forEach((node) => {
-    if (!state.livePinned.has(node.id()) && seeded[node.id()]) node.position(seeded[node.id()]);
+  const liveNodes = cy.nodes("[liveKind]");
+  const graphNodes = liveNodes.map((node) => ({
+    id: node.id(), kind: node.data("liveKind"),
+  }));
+  const graphEdges = cy.edges("[liveKind]").map((edge) => ({
+    id: edge.id(), source: edge.source().id(), target: edge.target().id(),
+  }));
+
+  let layoutPositions = seeded;
+  let busEdgeIds = new Set();
+  if (state.liveLayoutMode === "hybrid_bus") {
+    const hybrid = hybridBusPositions(
+      graphNodes, graphEdges, seeded, state.livePinned
+    );
+    layoutPositions = hybrid.positions;
+    busEdgeIds = hybrid.busEdgeIds;
+  }
+  cy.batch(() => {
+    liveNodes.forEach((node) => {
+      if (!state.livePinned.has(node.id()) && layoutPositions[node.id()]) {
+        node.position(layoutPositions[node.id()]);
+      }
+    });
+    cy.edges("[liveKind]").forEach((edge) => {
+      edge.toggleClass("live-layout-bus", busEdgeIds.has(edge.id()));
+    });
   });
   applyLivePins();
   const fixedNodeConstraint = cy.nodes("[liveKind]").filter((node) =>
@@ -2413,13 +2442,24 @@ function runLiveLayout(animate) {
     );
   };
 
+  // The topology-aware modes are deterministic placement passes. They avoid
+  // the global spring solver entirely, which keeps curated anchors fixed and
+  // remains responsive on large announce/path graphs.
+  if (state.liveLayoutMode === "hybrid_bus" || state.liveLayoutMode === "radial") {
+    cy.fit(cy.elements(), 70);
+    finish(state.liveLayoutMode === "hybrid_bus"
+      ? "hybrid transfer buses + radial spokes"
+      : "radial topology clusters");
+    return;
+  }
+
   // Force-directed layouts become disproportionately expensive once announce
   // enrichment grows into the hundreds. The radial topology seed above still
   // performs a useful layout instead of leaving large graphs in fixed rows.
   if (nodeCount > 400) {
     cy.nodes("[liveKind]").unlock();
     cy.fit(cy.elements(), 70);
-    finish("radial topology clusters (force refinement skipped)");
+    finish("radial topology clusters (force mode skipped above 400 nodes)");
     return;
   }
 
@@ -2512,6 +2552,15 @@ document.getElementById("log-close").onclick = () => { logNode = null; document.
 document.getElementById("log-refresh").onclick = refreshLog;
 
 setupHold(document.getElementById("btn-layout"), 2000, runLayout);
+const liveLayoutModeSelect = document.getElementById("live-layout-mode");
+if (!Array.from(liveLayoutModeSelect.options).some((option) => option.value === state.liveLayoutMode)) {
+  state.liveLayoutMode = "hybrid_bus";
+}
+liveLayoutModeSelect.value = state.liveLayoutMode;
+liveLayoutModeSelect.onchange = (event) => {
+  state.liveLayoutMode = event.target.value;
+  localStorage.setItem("reticulated.live-layout-mode", state.liveLayoutMode);
+};
 document.getElementById("btn-generate").onclick = () => document.getElementById("gen-modal").classList.remove("hidden");
 document.getElementById("gen-close").onclick = () => document.getElementById("gen-modal").classList.add("hidden");
 document.getElementById("gen-go").onclick = () => {

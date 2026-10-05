@@ -4,12 +4,41 @@ import test from "node:test";
 import {
   anchorNewPositions,
   captureLayoutState,
+  hybridBusPositions,
   mergeLivePositions,
   pruneLiveLayout,
   radialClusterPosition,
   rememberedPinnedRmapNodes,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("hybrid bus layout preserves pins and places transit nodes between anchors", () => {
+  const result = hybridBusPositions([
+    { id: "west", kind: "interface" },
+    { id: "east", kind: "interface" },
+    { id: "transit", kind: "transport" },
+    { id: "leaf", kind: "destination" },
+  ], [
+    { id: "w-t", source: "west", target: "transit" },
+    { id: "t-e", source: "transit", target: "east" },
+    { id: "t-l", source: "transit", target: "leaf" },
+  ], {
+    west: { x: -500, y: -120 },
+    east: { x: 500, y: 120 },
+    transit: { x: 9000, y: 9000 },
+    leaf: { x: 9100, y: 9100 },
+  }, new Set(["west", "east"]));
+
+  assert.deepEqual(result.positions.west, { x: -500, y: -120 });
+  assert.deepEqual(result.positions.east, { x: 500, y: 120 });
+  assert.ok(result.positions.transit.x > -500 && result.positions.transit.x < 500);
+  assert.ok(Math.hypot(
+    result.positions.leaf.x - result.positions.transit.x,
+    result.positions.leaf.y - result.positions.transit.y,
+  ) < 400);
+  assert.ok(result.busEdgeIds.has("w-t"));
+  assert.ok(result.busEdgeIds.has("t-e"));
+});
 
 test("a pinned RMAP node is rehydrated when its active route disappears", () => {
   const remembered = rememberedPinnedRmapNodes({

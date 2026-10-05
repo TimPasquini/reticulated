@@ -29,6 +29,11 @@
     <button id="btn-options" class="sim-only">Options</button>
     <button id="btn-generate" class="sim-only">Generate</button>
     <button id="btn-layout" class="hold-btn" title="Hold 2 seconds to lay out the graph"><span>Layout</span></button>
+    <select id="live-layout-mode" class="live-only" title="Automatic topology layout mode">
+      <option value="hybrid_bus">Hybrid bus + spokes</option>
+      <option value="radial">Radial hubs</option>
+      <option value="force">Force clusters</option>
+    </select>
     <span class="sep sim-only"></span>
     <button id="btn-save" class="sim-only">Save</button>
     <button id="btn-load" class="sim-only">Load</button>
@@ -153,6 +158,6 @@
     </div>
   </div>
 </div>
-<script type="module" src="/app.js?v=27"></script>
+<script type="module" src="/app.js?v=28"></script>
 </body>
 </html>
