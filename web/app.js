@@ -11,7 +11,8 @@ import {
   radialClusterPosition,
   rememberedPinnedRmapNodes,
   rememberLivePosition,
-} from "./live-layout.mjs?v=5";
+  shouldAutoSolveLiveLayout,
+} from "./live-layout.mjs?v=6";
 
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },
@@ -677,7 +678,7 @@ function livePositions(snapshot, renderModel) {
     const children = (interfacesByRoot.get(root.id) || []).sort();
     const anchor = positions[root.id];
     children.forEach((id, index) => {
-      positions[id] = radialClusterPosition(anchor, index, 260, 145);
+      positions[id] = radialClusterPosition(anchor, index, 480, 260);
     });
   }
   const peerEdges = renderModel.edges.filter((edge) => edge.kind === "observed_peer_interface");
@@ -692,12 +693,12 @@ function livePositions(snapshot, renderModel) {
     const anchor = positions[parentId];
     if (!anchor) continue;
     childIds.sort().forEach((id, index) => {
-      positions[id] = radialClusterPosition(anchor, index, 220, 125, Math.PI / 3);
+      positions[id] = radialClusterPosition(anchor, index, 440, 240, Math.PI / 3);
     });
   }
   const unpositionedInterfaces = (snapshot.interfaces || []).filter((item) => !positions[item.id]);
   unpositionedInterfaces.forEach((item, index) => {
-    positions[item.id] = radialClusterPosition({ x: 0, y: 0 }, index, 340, 150);
+    positions[item.id] = radialClusterPosition({ x: 0, y: 0 }, index, 620, 280);
   });
 
   // Spread next hops around the interfaces that observed them. Several next
@@ -718,7 +719,7 @@ function livePositions(snapshot, renderModel) {
     group.items.sort((left, right) => left.id.localeCompare(right.id));
     group.items.forEach((item, index) => {
       positions[item.id] = radialClusterPosition(
-        { x: group.anchorX, y: group.anchorY }, index, 250, 125
+        { x: group.anchorX, y: group.anchorY }, index, 500, 250
       );
     });
   }
@@ -746,7 +747,7 @@ function livePositions(snapshot, renderModel) {
       tierEdges.sort((left, right) => left.target.localeCompare(right.target));
       tierEdges.forEach((edge, index) => {
         positions[edge.target] = radialClusterPosition(
-          anchor, index, 230 + (tier - 1) * 150, 110, Math.PI / 2 + tier * 0.37
+          anchor, index, 460 + (tier - 1) * 280, 230, Math.PI / 2 + tier * 0.37
         );
       });
     }
@@ -1331,8 +1332,15 @@ function rebuildLive(snapshot) {
   // separately below: new elements first appear at deterministic seeds, then
   // a debounced solver animation lets the surrounding graph settle.
   const blankSlate = state.liveBlankSlateScope === liveLayoutScope();
-  const shouldAutoLayout = !blankSlate &&
-    (state.liveLayoutPending || (!hadLiveGraph && !hasSavedPositions));
+  const shouldAutoLayout = shouldAutoSolveLiveLayout({
+    pending: state.liveLayoutPending,
+    hadGraph: hadLiveGraph,
+    hasSavedPositions: hasSavedPositions,
+    blankSlate: blankSlate,
+  });
+  // A cached or explicitly loaded layout consumes the pending initial-layout
+  // request without allowing an automatic solver to perturb its coordinates.
+  if (hasSavedPositions) state.liveLayoutPending = false;
   if (hadLiveGraph && !shouldAutoLayout) {
     cy.zoom(oldZoom);
     cy.pan(oldPan);
@@ -1352,7 +1360,13 @@ function rebuildLive(snapshot) {
     // Initial entry and explicit pending requests use the selected solver.
     requestAnimationFrame(() => runSelectedLiveLayout(false, true, true));
   } else if (hadLiveGraph && topologyChanged && !blankSlate) {
-    scheduleLiveTopologySettle();
+    if (hasSavedPositions) {
+      // anchorNewPositions() placed only the genuinely new elements. Persist
+      // those additions while leaving every restored coordinate untouched.
+      scheduleLiveAutosave();
+    } else {
+      scheduleLiveTopologySettle();
+    }
   }
 }
 
@@ -2536,13 +2550,13 @@ async function runElkLayeredLayout({ animate = true, fitViewport = true, clearPi
         "elk.algorithm": "layered",
         "elk.direction": "RIGHT",
         "elk.edgeRouting": "ORTHOGONAL",
-        "elk.spacing.nodeNode": "120",
-        "elk.spacing.edgeNode": "70",
-        "elk.spacing.edgeEdge": "40",
-        "elk.spacing.componentComponent": "280",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "260",
-        "elk.layered.spacing.edgeNodeBetweenLayers": "90",
-        "elk.layered.spacing.edgeEdgeBetweenLayers": "35",
+        "elk.spacing.nodeNode": "240",
+        "elk.spacing.edgeNode": "140",
+        "elk.spacing.edgeEdge": "80",
+        "elk.spacing.componentComponent": "520",
+        "elk.layered.spacing.nodeNodeBetweenLayers": "520",
+        "elk.layered.spacing.edgeNodeBetweenLayers": "180",
+        "elk.layered.spacing.edgeEdgeBetweenLayers": "70",
         "elk.layered.layering.strategy": "COFFMAN_GRAHAM",
         "elk.layered.layering.coffmanGraham.layerBound": String(elkLayerBound(liveNodes.length)),
         "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
@@ -2779,9 +2793,9 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
     nodeDimensionsIncludeLabels: true,
     samplingType: true,
     sampleSize: 25,
-    nodeSeparation: 190,
-    nodeRepulsion: 11000,
-    idealEdgeLength: 225,
+    nodeSeparation: 340,
+    nodeRepulsion: 26000,
+    idealEdgeLength: 460,
     edgeElasticity: 0.35,
     nestingFactor: 0.1,
     gravity: 0.08,
@@ -2841,7 +2855,7 @@ function runLayout() {
   }
   const layout = cy.layout({
     name: "cose", animate: true, animationDuration: 900, randomize: true,
-    nodeOverlap: 50, idealEdgeLength: 220, componentSpacing: 260,
+    nodeOverlap: 90, idealEdgeLength: 440, componentSpacing: 520,
     nodeRepulsion: 650000, gravity: 0.2, numIter: 1600, padding: 70, fit: true,
   });
   layout.one("layoutstop", saveLayout);

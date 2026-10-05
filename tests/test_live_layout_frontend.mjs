@@ -16,7 +16,16 @@ import {
   radialFanPosition,
   rememberedPinnedRmapNodes,
   rememberLivePosition,
+  shouldAutoSolveLiveLayout,
 } from "../web/live-layout.mjs";
+
+test("saved absolute coordinates suppress noisy automatic re-solves", () => {
+  assert.equal(shouldAutoSolveLiveLayout({ pending: true, hasSavedPositions: true }), false);
+  assert.equal(shouldAutoSolveLiveLayout({ hadGraph: true, hasSavedPositions: true }), false);
+  assert.equal(shouldAutoSolveLiveLayout({ pending: true, hasSavedPositions: false }), true);
+  assert.equal(shouldAutoSolveLiveLayout({ hadGraph: false, hasSavedPositions: false }), true);
+  assert.equal(shouldAutoSolveLiveLayout({ pending: true, blankSlate: true }), false);
+});
 
 test("live nodes receive useful semantic cluster keys", () => {
   assert.equal(liveSemanticGroup("interface", { type: "I2PInterface" }), "interface:i2p");
@@ -30,9 +39,9 @@ test("clustered forks pack categories ahead of a hub instead of around its perim
     ["service:lxmf", ["lxmf-1", "lxmf-2", "lxmf-3", "lxmf-4"]],
     ["service:rnsh", ["rnsh-1", "rnsh-2"]],
   ]), 0);
-  assert.ok(Object.values(packed).every((point) => point.x >= 390));
-  assert.ok(Math.abs(packed["lxmf-1"].y - packed["lxmf-2"].y) < 400);
-  assert.ok(Math.abs(packed["lxmf-1"].y - packed["rnsh-1"].y) > 200);
+  assert.ok(Object.values(packed).every((point) => point.x >= 720));
+  assert.ok(Math.abs(packed["lxmf-1"].y - packed["lxmf-2"].y) < 600);
+  assert.ok(Math.abs(packed["lxmf-1"].y - packed["rnsh-1"].y) > 400);
 });
 
 test("radial spoke continuations fan in their parent's outward direction", () => {
@@ -106,7 +115,7 @@ test("hybrid bus layout preserves pins and places transit nodes between anchors"
   assert.ok(Math.hypot(
     result.positions.leaf.x - result.positions.transit.x,
     result.positions.leaf.y - result.positions.transit.y,
-  ) < 400);
+  ) < 1000);
   assert.ok(result.busEdgeIds.has("w-t"));
   assert.ok(result.busEdgeIds.has("t-e"));
 });
@@ -134,11 +143,11 @@ test("hybrid layout keeps unknown-hop ghosts in spokes instead of transfer buses
   assert.ok(Math.hypot(
     result.positions.ghost.x - result.positions["next-hop"].x,
     result.positions.ghost.y - result.positions["next-hop"].y,
-  ) < 500);
+  ) < 1000);
   assert.ok(Math.hypot(
     result.positions.destination.x - result.positions.ghost.x,
     result.positions.destination.y - result.positions.ghost.y,
-  ) < 500);
+  ) < 1000);
 });
 
 test("unknown-hop branches pack by depth and extend destinations away from the hub", () => {

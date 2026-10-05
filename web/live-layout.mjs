@@ -9,6 +9,16 @@ export function mergeLivePositions(generated, saved, current, pinnedIds) {
   return merged;
 }
 
+export function shouldAutoSolveLiveLayout({
+  pending = false, hadGraph = false, hasSavedPositions = false, blankSlate = false,
+} = {}) {
+  // Saved coordinates describe an arrangement, not merely seeds for a force
+  // solver. Preserve them exactly until the user explicitly requests Layout.
+  // New nodes are already placed relative to their closest known parent by
+  // anchorNewPositions(), so they do not require a global noisy re-solve.
+  return !blankSlate && !hasSavedPositions && (pending || !hadGraph);
+}
+
 export function anchorNewPositions(generated, merged, saved, current, edges) {
   const positions = { ...(merged || {}) };
   const existing = new Set([
@@ -129,10 +139,13 @@ export function liveSemanticGroup(kind, item = {}) {
 export function clusteredForkPositions(anchor, groups, directionAngle, options = {}) {
   const forward = { x: Math.cos(directionAngle), y: Math.sin(directionAngle) };
   const lateral = { x: -forward.y, y: forward.x };
-  const cellDepth = options.cellDepth || 170;
-  const cellWidth = options.cellWidth || 145;
-  const stem = options.stem || 390;
-  const gap = options.gap || 190;
+  // These distances account for both the node body and its rendered label.
+  // Shorter point-graph defaults technically avoid overlap but leave almost
+  // no inspectable edge between Reticulated's 100-150px labelled nodes.
+  const cellDepth = options.cellDepth || 320;
+  const cellWidth = options.cellWidth || 260;
+  const stem = options.stem || 720;
+  const gap = options.gap || 420;
   const prepared = Array.from(groups.entries()).sort(([left], [right]) =>
     left.localeCompare(right)
   ).map(([key, ids]) => {
@@ -140,7 +153,7 @@ export function clusteredForkPositions(anchor, groups, directionAngle, options =
     const rows = Math.max(1, Math.ceil(ids.length / columns));
     return {
       key, ids: ids.slice().sort(), columns, rows,
-      width: Math.max(220, (rows - 1) * cellWidth + 120),
+      width: Math.max(380, (rows - 1) * cellWidth + 180),
     };
   });
   const totalWidth = prepared.reduce((sum, group) => sum + group.width, 0) +
@@ -305,7 +318,7 @@ export function hybridBusPositions(nodes, edges, initialPositions, pinnedIds) {
       // Parallel lanes keep multiple logical transfers legible without
       // pretending that their intermediate routers are known.
       const lane = index - (entries.length - 1) / 2;
-      const offset = lane * 110;
+      const offset = lane * 260;
       positions[entry.id] = {
         x: a.x + dx * t - (dy / length) * offset,
         y: a.y + dy * t + (dx / length) * offset,
