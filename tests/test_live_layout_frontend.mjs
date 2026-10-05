@@ -77,6 +77,36 @@ test("hybrid bus layout preserves pins and places transit nodes between anchors"
   assert.ok(result.busEdgeIds.has("t-e"));
 });
 
+test("hybrid layout keeps unknown-hop ghosts in spokes instead of transfer buses", () => {
+  const result = hybridBusPositions([
+    { id: "west", kind: "interface" },
+    { id: "east", kind: "interface" },
+    { id: "next-hop", kind: "transport" },
+    { id: "ghost", kind: "ghost_segment" },
+    { id: "destination", kind: "destination" },
+  ], [
+    { id: "w-hop", source: "west", target: "next-hop" },
+    { id: "e-hop", source: "east", target: "next-hop" },
+    { id: "hop-ghost", source: "next-hop", target: "ghost" },
+    { id: "ghost-destination", source: "ghost", target: "destination" },
+  ], {
+    west: { x: -600, y: 0 }, east: { x: 600, y: 0 },
+    "next-hop": { x: 0, y: 0 }, ghost: { x: 0, y: 0 },
+    destination: { x: 0, y: 0 },
+  }, new Set(["west", "east"]));
+
+  assert.equal(result.busNodeIds.has("ghost"), false);
+  assert.equal(result.busEdgeIds.has("hop-ghost"), false);
+  assert.ok(Math.hypot(
+    result.positions.ghost.x - result.positions["next-hop"].x,
+    result.positions.ghost.y - result.positions["next-hop"].y,
+  ) < 500);
+  assert.ok(Math.hypot(
+    result.positions.destination.x - result.positions.ghost.x,
+    result.positions.destination.y - result.positions.ghost.y,
+  ) < 500);
+});
+
 test("a pinned RMAP node is rehydrated when its active route disappears", () => {
   const remembered = rememberedPinnedRmapNodes({
     positions: { rmapNode: { x: -90, y: 250 } },

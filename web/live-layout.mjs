@@ -101,7 +101,7 @@ export function elkLayerBound(nodeCount) {
 }
 
 const TRANSIT_KINDS = new Set([
-  "root", "interface", "transport", "rmap_transport", "persisted_rmap", "ghost_segment",
+  "root", "interface", "transport", "rmap_transport", "persisted_rmap",
 ]);
 
 function graphDistances(start, adjacency) {
