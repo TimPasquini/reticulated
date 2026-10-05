@@ -86,6 +86,23 @@ class LiveLayoutStoreTests(unittest.TestCase):
         )
         self.assertEqual(overwritten["positions"]["visible"], {"x": 50.0, "y": 60.0})
 
+    def test_replace_drops_absent_pins_and_delete_removes_autosave(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LiveLayoutStore(Path(directory) / "layouts.json")
+            store.save("all", "__autosave__", {
+                "positions": {"hidden": {"x": -30, "y": 40}},
+                "pinned": ["hidden"],
+            })
+            replaced = store.save(
+                "all", "__autosave__", {"positions": {}, "pinned": []},
+                retain_absent_pins=False,
+            )
+            self.assertEqual(replaced["pinned"], [])
+            self.assertEqual(replaced["positions"], {})
+            self.assertTrue(store.delete("all", "__autosave__"))
+            self.assertIsNone(store.get("all", "__autosave__"))
+            self.assertFalse(store.delete("all", "__autosave__"))
+
     def test_rejects_non_finite_positions_and_unknown_pin_ids(self):
         with self.assertRaises(ValueError):
             validate_layout("all", "bad", {

@@ -138,7 +138,9 @@ class LiveLayoutStore:
             layout = self._read().get("layouts", {}).get(scope, {}).get(name)
             return json.loads(json.dumps(layout)) if layout is not None else None
 
-    def save(self, scope: str, name: str, layout: Any) -> dict[str, Any]:
+    def save(
+        self, scope: str, name: str, layout: Any, *, retain_absent_pins: bool = True,
+    ) -> dict[str, Any]:
         normalized = validate_layout(scope, name, layout)
         with self._lock:
             document = self._read()
@@ -147,7 +149,7 @@ class LiveLayoutStore:
             existing = scoped_layouts.get(name, {})
             existing_positions = existing.get("positions", {})
             retained_pins = set(normalized["pinned"])
-            for node_id in existing.get("pinned", []):
+            for node_id in existing.get("pinned", []) if retain_absent_pins else []:
                 # Omitted means not currently visible. A visible intentional
                 # unpin still submits the node's position without its ID in
                 # the pinned list, and therefore does not enter this branch.
@@ -163,6 +165,20 @@ class LiveLayoutStore:
             scoped_layouts[name] = normalized
             self._write(document)
         return json.loads(json.dumps(normalized))
+
+    def delete(self, scope: str, name: str) -> bool:
+        _validate_key(scope, SCOPE_PATTERN, "scope")
+        _validate_key(name, LAYOUT_NAME_PATTERN, "name")
+        with self._lock:
+            document = self._read()
+            scoped_layouts = document.get("layouts", {}).get(scope, {})
+            removed = scoped_layouts.pop(name, None) is not None
+            if not removed:
+                return False
+            if not scoped_layouts:
+                document.get("layouts", {}).pop(scope, None)
+            self._write(document)
+            return True
 
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():

@@ -345,9 +345,21 @@ def get_live_layout(scope: str, name: str):
 
 
 @app.put("/api/live/layouts/{scope}/{name}")
-def put_live_layout(scope: str, name: str, body: LiveLayoutBody):
+def put_live_layout(
+    scope: str, name: str, body: LiveLayoutBody, replace: bool = False,
+):
     try:
-        return live_layouts.save(scope, name, body.model_dump())
+        return live_layouts.save(
+            scope, name, body.model_dump(), retain_absent_pins=not replace,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/live/layouts/{scope}/{name}")
+def delete_live_layout(scope: str, name: str):
+    try:
+        return {"deleted": live_layouts.delete(scope, name)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

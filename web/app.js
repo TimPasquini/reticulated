@@ -75,6 +75,8 @@ const state = {
   liveLayoutScope: null,
   liveLayoutSaveTimer: null,
   liveLayoutSaveGeneration: 0,
+  liveBlankSlateScope: null,
+  livePendingSaves: new Set(),
   liveLayouts: [],
   topology: { nodes: {}, links: {} },
   addresses: {},
@@ -803,11 +805,19 @@ function rememberLiveNodePosition(node) {
   state.liveSavedLayout.pinned_nodes = pinnedNodes;
 }
 
-async function saveLiveLayout(name, quiet) {
+async function saveLiveLayout(name, quiet, replace = false) {
   if (state.uiMode !== "live" || !cy.nodes("[liveKind]").length) return;
   const scope = liveLayoutScope();
   const generation = ++state.liveLayoutSaveGeneration;
-  const saved = await api.put(liveLayoutPath(scope, name), captureLiveLayout());
+  const path = liveLayoutPath(scope, name) + (replace ? "?replace=true" : "");
+  const request = api.put(path, captureLiveLayout());
+  state.livePendingSaves.add(request);
+  let saved;
+  try {
+    saved = await request;
+  } finally {
+    state.livePendingSaves.delete(request);
+  }
   if (!saved || !saved.positions) return;
   // A slow earlier request must not replace coordinates captured by a later
   // drag, nor install a layout after the user switched reporter scopes.
@@ -823,6 +833,7 @@ async function saveLiveLayout(name, quiet) {
 
 function scheduleLiveAutosave() {
   if (state.uiMode !== "live") return;
+  if (state.liveBlankSlateScope === liveLayoutScope()) return;
   if (state.liveLayoutSaveTimer) clearTimeout(state.liveLayoutSaveTimer);
   state.liveLayoutSaveTimer = setTimeout(() => {
     state.liveLayoutSaveTimer = null;
@@ -868,6 +879,10 @@ async function ensureLiveLayoutScope(scope) {
   state.liveLayoutScope = scope;
   state.livePinned = new Set();
   state.liveSavedLayout = null;
+  if (state.liveBlankSlateScope === scope) {
+    await refreshLiveLayouts();
+    return;
+  }
   const cached = await api.get(liveLayoutPath(scope, "__autosave__"));
   if (cached && cached.positions) {
     state.liveSavedLayout = cached;
@@ -1293,7 +1308,9 @@ function rebuildLive(snapshot) {
   // Newly received announces must not launch the force solver every poll.
   // Their deterministic seed positions are immediately usable; users can run
   // Layout explicitly when they want a global refinement.
-  const shouldAutoLayout = state.liveLayoutPending || (!hadLiveGraph && !hasSavedPositions);
+  const blankSlate = state.liveBlankSlateScope === liveLayoutScope();
+  const shouldAutoLayout = !blankSlate &&
+    (state.liveLayoutPending || (!hadLiveGraph && !hasSavedPositions));
   if (hadLiveGraph && !shouldAutoLayout) {
     cy.zoom(oldZoom);
     cy.pan(oldPan);
@@ -2065,6 +2082,7 @@ async function completeLiveNodeDrag(node) {
   const position = node.position();
   const moved = Math.hypot(position.x - start.x, position.y - start.y) > 0.5;
   if (moved) {
+    state.liveBlankSlateScope = null;
     state.livePinned.add(id);
     // Commit the coordinate before permitting a deferred topology rebuild.
     rememberLiveNodePosition(node);
@@ -2125,6 +2143,7 @@ document.getElementById("live-reporter").onchange = (event) => {
   state.liveLayoutScope = null;
   state.liveSavedLayout = null;
   state.livePinned = new Set();
+  state.liveBlankSlateScope = null;
   state.liveLayoutSaveGeneration += 1;
   state.liveMapHasInitialView = false;
   state.liveMapSignature = null;
@@ -2135,6 +2154,7 @@ document.getElementById("btn-live-pin").onclick = () => {
   const selected = cy.nodes("[liveKind]:selected");
   if (selected.length !== 1) return;
   const id = selected[0].id();
+  state.liveBlankSlateScope = null;
   if (state.livePinned.has(id)) state.livePinned.delete(id);
   else state.livePinned.add(id);
   rememberLiveNodePosition(selected[0]);
@@ -2152,11 +2172,39 @@ document.getElementById("btn-live-clear-pins").onclick = async () => {
   cy.nodes(".live-rmap-persisted").remove();
   applyLivePins();
   try {
-    await saveLiveLayout("__autosave__", true);
+    await saveLiveLayout("__autosave__", true, true);
   } catch (error) {
     scheduleLiveAutosave();
   }
 };
+async function resetLiveWorkspace() {
+  if (state.uiMode !== "live") return;
+  const scope = liveLayoutScope();
+  state.liveBlankSlateScope = scope;
+  state.liveLayoutSaveGeneration += 1;
+  if (state.liveLayoutSaveTimer) {
+    clearTimeout(state.liveLayoutSaveTimer);
+    state.liveLayoutSaveTimer = null;
+  }
+  // Let writes that already reached the server finish, then delete last. This
+  // prevents an old autosave response from recreating the workspace after the
+  // reset request completes.
+  await Promise.allSettled(Array.from(state.livePendingSaves));
+  await api.del(liveLayoutPath(scope, "__autosave__"));
+  if (scope !== liveLayoutScope()) return;
+  state.liveLayoutSaveGeneration += 1;
+  state.liveSavedLayout = null;
+  state.livePinned = new Set();
+  state.liveDeferredSnapshot = null;
+  state.liveLayoutPending = false;
+  state.liveGraphSignature = null;
+  state.liveSlots = {};
+  state.liveNextSlot = {};
+  cy.elements().remove();
+  applyLivePins();
+  if (state.live) applyLiveSnapshot(state.live);
+  else loadLiveState();
+}
 document.getElementById("btn-live-save-layout").onclick = async () => {
   const name = window.prompt("Layout name:");
   if (!name || !name.trim()) return;
@@ -2180,6 +2228,7 @@ document.getElementById("btn-live-load-layout").onclick = async () => {
   if (!name) return;
   const layout = await api.get(liveLayoutPath(liveLayoutScope(), name));
   if (layout && layout.positions) {
+    state.liveBlankSlateScope = null;
     state.liveLayoutSaveGeneration += 1;
     applyLiveLayout(layout, false);
     // The selected layout may contain remembered RMAP anchors that are not in
@@ -2556,6 +2605,7 @@ function runLiveLayout(animate) {
 function runLayout() {
   if (!cy.nodes().length) return;
   if (state.uiMode === "live") {
+    state.liveBlankSlateScope = null;
     state.liveLayoutPending = true;
     runLiveLayout(true);
     return;
@@ -2608,6 +2658,11 @@ document.getElementById("log-close").onclick = () => { logNode = null; document.
 document.getElementById("log-refresh").onclick = refreshLog;
 
 setupHold(document.getElementById("btn-layout"), 2000, runLayout);
+setupHold(document.getElementById("btn-live-reset-workspace"), 2000, () => {
+  resetLiveWorkspace().catch((error) => {
+    window.alert("Could not reset the live workspace: " + error);
+  });
+});
 const liveLayoutModeSelect = document.getElementById("live-layout-mode");
 if (!Array.from(liveLayoutModeSelect.options).some((option) => option.value === state.liveLayoutMode)) {
   state.liveLayoutMode = "hybrid_bus";
