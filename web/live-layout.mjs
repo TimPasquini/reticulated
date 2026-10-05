@@ -73,6 +73,26 @@ export function radialClusterPosition(
   };
 }
 
+export function orthogonalSegmentGeometry(section) {
+  const bends = (section && section.bendPoints) || [];
+  const start = section && section.startPoint;
+  const end = section && section.endPoint;
+  if (!start || !end || !bends.length) return null;
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  const length = Math.sqrt(lengthSquared);
+  if (length < 0.001) return null;
+  return {
+    weights: bends.map((point) =>
+      ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared
+    ),
+    distances: bends.map((point) =>
+      ((point.y - start.y) * dx - (point.x - start.x) * dy) / length
+    ),
+  };
+}
+
 const TRANSIT_KINDS = new Set([
   "root", "interface", "transport", "rmap_transport", "persisted_rmap", "ghost_segment",
 ]);

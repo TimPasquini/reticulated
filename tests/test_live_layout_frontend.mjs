@@ -7,11 +7,26 @@ import {
   clearPinnedLayout,
   hybridBusPositions,
   mergeLivePositions,
+  orthogonalSegmentGeometry,
   pruneLiveLayout,
   radialClusterPosition,
   rememberedPinnedRmapNodes,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("ELK bend points convert to Cytoscape segment geometry", () => {
+  const geometry = orthogonalSegmentGeometry({
+    startPoint: { x: 0, y: 0 },
+    endPoint: { x: 100, y: 0 },
+    bendPoints: [{ x: 25, y: 40 }, { x: 75, y: 40 }],
+  });
+
+  assert.deepEqual(geometry.weights, [0.25, 0.75]);
+  assert.deepEqual(geometry.distances, [40, 40]);
+  assert.equal(orthogonalSegmentGeometry({
+    startPoint: { x: 0, y: 0 }, endPoint: { x: 100, y: 0 }, bendPoints: [],
+  }), null);
+});
 
 test("clearing pins also retires hidden pinned RMAP metadata", () => {
   const cleared = clearPinnedLayout({

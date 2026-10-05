@@ -11,6 +11,7 @@
 <script src="/vendor/layout-base-2.0.1.js"></script>
 <script src="/vendor/cose-base-2.2.0.js"></script>
 <script src="/vendor/cytoscape-fcose-2.2.0.js"></script>
+<script src="/vendor/elk-api-0.12.0.js"></script>
 </head>
 <body>
 <div id="app">
@@ -33,6 +34,7 @@
       <option value="hybrid_bus">Hybrid bus + spokes</option>
       <option value="radial">Radial hubs</option>
       <option value="force">Force clusters</option>
+      <option value="elk_layered">ELK layered + orthogonal (clears pins)</option>
     </select>
     <span class="sep sim-only"></span>
     <button id="btn-save" class="sim-only">Save</button>
@@ -160,6 +162,6 @@
     </div>
   </div>
 </div>
-<script type="module" src="/app.js?v=30"></script>
+<script type="module" src="/app.js?v=31"></script>
 </body>
 </html>

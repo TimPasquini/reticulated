@@ -4,6 +4,7 @@ import {
   clearPinnedLayout,
   hybridBusPositions,
   mergeLivePositions,
+  orthogonalSegmentGeometry,
   pruneLiveLayout,
   radialClusterPosition,
   rememberedPinnedRmapNodes,
@@ -96,6 +97,10 @@ const state = {
   showNodeLogs: false,
   trafficPick: [],
 };
+
+const elkLayoutEngine = window.ELK ? new window.ELK({
+  workerUrl: "/vendor/elk-worker-0.12.0.min.js",
+}) : null;
 
 function fmtBitrate(bps) {
   if (bps >= 1000000) return (bps / 1000000).toFixed(bps % 1000000 ? 1 : 0) + "Mbps";
@@ -298,6 +303,12 @@ const cy = cytoscape({
     }},
     { selector: "edge.live-layout-bus", style: {
       "width": 4, "opacity": 0.72, "curve-style": "straight",
+    }},
+    { selector: "edge.elk-orthogonal", style: {
+      "curve-style": "segments",
+      "segment-distances": "data(elkSegmentDistances)",
+      "segment-weights": "data(elkSegmentWeights)",
+      "edge-distances": "node-position",
     }},
     { selector: "edge.live-discovered:selected", style: { "label": "data(label)" }},
     { selector: "edge.announce-flash", style: { "line-color": "#ffd34d", "width": 5 }},
@@ -2161,8 +2172,7 @@ document.getElementById("btn-live-pin").onclick = () => {
   applyLivePins();
   scheduleLiveAutosave();
 };
-document.getElementById("btn-live-clear-pins").onclick = async () => {
-  if (!state.livePinned.size) return;
+async function clearAllLivePins() {
   state.livePinned.clear();
   if (state.liveSavedLayout) {
     state.liveSavedLayout = clearPinnedLayout(state.liveSavedLayout);
@@ -2171,10 +2181,15 @@ document.getElementById("btn-live-clear-pins").onclick = async () => {
   // Remove them immediately instead of waiting for a graph-signature change.
   cy.nodes(".live-rmap-persisted").remove();
   applyLivePins();
+  await saveLiveLayout("__autosave__", true, true);
+}
+document.getElementById("btn-live-clear-pins").onclick = async () => {
+  if (!state.livePinned.size) return;
   try {
-    await saveLiveLayout("__autosave__", true, true);
+    await clearAllLivePins();
   } catch (error) {
     scheduleLiveAutosave();
+    window.alert("Could not clear every saved pin: " + error);
   }
 };
 async function resetLiveWorkspace() {
@@ -2478,6 +2493,99 @@ function setupHold(btn, ms, action) {
 
 setupHold(document.getElementById("btn-reset"), 3000, () => api.post("/api/reset"));
 
+async function runElkLayeredLayout() {
+  if (!state.live || !cy.nodes().length || state.liveLayoutRunning) return;
+  if (!elkLayoutEngine) {
+    window.alert("ELK Layered is unavailable in this build.");
+    return;
+  }
+  state.liveLayoutRunning = true;
+  state.liveLayoutPending = false;
+  state.liveBlankSlateScope = null;
+  const scope = liveLayoutScope();
+  const startedAt = performance.now();
+  try {
+    // ELK Layered owns the whole canvas. Pins are deliberately and
+    // authoritatively removed before its crossing-minimisation pass.
+    await clearAllLivePins();
+    if (scope !== liveLayoutScope()) return;
+    const liveNodes = cy.nodes("[liveKind]");
+    const liveEdges = cy.edges("[liveKind]");
+    const graph = {
+      id: "reticulated-live",
+      layoutOptions: {
+        "elk.algorithm": "layered",
+        "elk.direction": "RIGHT",
+        "elk.edgeRouting": "ORTHOGONAL",
+        "elk.spacing.nodeNode": "75",
+        "elk.spacing.edgeNode": "35",
+        "elk.spacing.edgeEdge": "25",
+        "elk.layered.spacing.nodeNodeBetweenLayers": "150",
+        "elk.layered.spacing.edgeNodeBetweenLayers": "55",
+        "elk.layered.layering.strategy": "NETWORK_SIMPLEX",
+        "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
+        "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
+        "elk.layered.nodePlacement.bk.edgeStraightening": "IMPROVE_STRAIGHTNESS",
+        "elk.layered.mergeEdges": "true",
+        "elk.separateConnectedComponents": "true",
+      },
+      children: liveNodes.map((node) => {
+        const bounds = node.boundingBox({ includeLabels: true, includeOverlays: false });
+        return {
+          id: node.id(),
+          width: Math.max(50, bounds.w),
+          height: Math.max(50, bounds.h),
+        };
+      }),
+      edges: liveEdges.map((edge) => ({
+        id: edge.id(), sources: [edge.source().id()], targets: [edge.target().id()],
+      })),
+    };
+    const result = await elkLayoutEngine.layout(graph);
+    if (scope !== liveLayoutScope() || state.uiMode !== "live") return;
+    const resultNodes = new Map((result.children || []).map((node) => [node.id, node]));
+    const resultEdges = new Map((result.edges || []).map((edge) => [edge.id, edge]));
+    cy.batch(() => {
+      liveNodes.forEach((node) => {
+        const placed = resultNodes.get(node.id());
+        if (!placed) return;
+        node.position({
+          x: placed.x + placed.width / 2,
+          y: placed.y + placed.height / 2,
+        });
+      });
+      liveEdges.forEach((edge) => {
+        const routed = resultEdges.get(edge.id());
+        const segments = orthogonalSegmentGeometry(
+          routed && routed.sections && routed.sections[0]
+        );
+        edge.removeClass("live-layout-bus");
+        edge.toggleClass("elk-orthogonal", Boolean(segments));
+        if (segments) {
+          edge.data("elkSegmentWeights", segments.weights);
+          edge.data("elkSegmentDistances", segments.distances);
+        } else {
+          edge.removeData("elkSegmentWeights");
+          edge.removeData("elkSegmentDistances");
+        }
+      });
+    });
+    cy.fit(cy.elements(), 70);
+    scheduleLiveAutosave();
+    console.info(
+      "Reticulated layout profile: ELK layered + orthogonal,",
+      liveNodes.length + " nodes,", liveEdges.length + " edges,",
+      Math.round(performance.now() - startedAt) + "ms"
+    );
+  } catch (error) {
+    console.error("ELK layout failed", error);
+    window.alert("ELK Layered layout failed: " + error);
+  } finally {
+    state.liveLayoutRunning = false;
+    applyLivePins();
+  }
+}
+
 function runLiveLayout(animate) {
   if (!state.live || !cy.nodes().length || state.liveLayoutRunning) return;
   state.liveLayoutRunning = true;
@@ -2525,6 +2633,9 @@ function runLiveLayout(animate) {
     });
     cy.edges("[liveKind]").forEach((edge) => {
       edge.toggleClass("live-layout-bus", busEdgeIds.has(edge.id()));
+      edge.removeClass("elk-orthogonal");
+      edge.removeData("elkSegmentWeights");
+      edge.removeData("elkSegmentDistances");
     });
   });
   applyLivePins();
@@ -2606,6 +2717,10 @@ function runLayout() {
   if (!cy.nodes().length) return;
   if (state.uiMode === "live") {
     state.liveBlankSlateScope = null;
+    if (state.liveLayoutMode === "elk_layered") {
+      runElkLayeredLayout();
+      return;
+    }
     state.liveLayoutPending = true;
     runLiveLayout(true);
     return;
