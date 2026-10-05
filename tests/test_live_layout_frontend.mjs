@@ -7,9 +7,11 @@ import {
   clearPinnedLayout,
   elkLayerBound,
   hybridBusPositions,
+  inferredRouteNodeId,
   clusteredForkPositions,
   liveSemanticGroup,
   mergeLivePositions,
+  migrateLayoutNodeId,
   orthogonalSegmentGeometry,
   pruneLiveLayout,
   radialClusterPosition,
@@ -18,6 +20,45 @@ import {
   rememberLivePosition,
   shouldAutoSolveLiveLayout,
 } from "../web/live-layout.mjs";
+
+test("an inferred route recycles its pin after disappearing and reappearing", () => {
+  const firstId = inferredRouteNodeId({
+    id: "observation-old", reporter_id: "fedora", source: "transport:patroon", hops: 3,
+  }, "announce-identity:alice");
+  const refreshedId = inferredRouteNodeId({
+    id: "observation-new", reporter_id: "fedora", source: "transport:patroon", hops: 4,
+  }, "announce-identity:alice");
+  assert.equal(refreshedId, firstId);
+  assert.notEqual(inferredRouteNodeId({
+    reporter_id: "fedora", source: "transport:other",
+  }, "announce-identity:alice"), firstId);
+
+  const position = { x: 1234, y: -567 };
+  const captured = captureLayoutState(
+    null, { [firstId]: position }, new Set([firstId]), null, {}
+  );
+  const absent = pruneLiveLayout(captured, new Set());
+  assert.equal(absent.layout.pinned.includes(firstId), true);
+  assert.deepEqual(absent.layout.positions[firstId], position);
+
+  const restored = mergeLivePositions(
+    { [refreshedId]: { x: 0, y: 0 } }, absent.layout.positions, {}, new Set([refreshedId])
+  );
+  assert.deepEqual(restored[refreshedId], position);
+});
+
+test("legacy inferred pins migrate to stable route IDs", () => {
+  const migrated = migrateLayoutNodeId({
+    positions: { "ghost-segment:old-edge": { x: 9, y: -12 } },
+    pinned: ["ghost-segment:old-edge"],
+    pinned_nodes: {},
+  }, "ghost-segment:old-edge", "ghost-route:stable");
+
+  assert.equal(migrated.changed, true);
+  assert.deepEqual(migrated.layout.positions["ghost-route:stable"], { x: 9, y: -12 });
+  assert.deepEqual(migrated.layout.pinned, ["ghost-route:stable"]);
+  assert.equal(migrated.layout.positions["ghost-segment:old-edge"], undefined);
+});
 
 test("saved absolute coordinates suppress noisy automatic re-solves", () => {
   assert.equal(shouldAutoSolveLiveLayout({ pending: true, hasSavedPositions: true }), false);

@@ -19,6 +19,43 @@ export function shouldAutoSolveLiveLayout({
   return !blankSlate && !hasSavedPositions && (pending || !hadGraph);
 }
 
+export function inferredRouteNodeId(edge, logicalTargetId) {
+  // Backend edge IDs describe an individual observation and can change when
+  // reports are merged or refreshed. An inferred body instead represents the
+  // stable logical gap from one reporter/source to one logical destination.
+  // Hop-count changes update that body's label; they do not create a new body
+  // or discard a coordinate the user pinned for the same route.
+  return [
+    "ghost-route",
+    String((edge || {}).reporter_id || "local"),
+    String((edge || {}).source || "unknown"),
+    String(logicalTargetId || (edge || {}).target || "unknown"),
+  ].map(encodeURIComponent).join(":");
+}
+
+export function migrateLayoutNodeId(layout, oldId, newId) {
+  if (!layout || !layout.positions || oldId === newId || !layout.positions[oldId]) {
+    return { layout, changed: false };
+  }
+  const positions = { ...layout.positions };
+  if (!positions[newId]) positions[newId] = positions[oldId];
+  delete positions[oldId];
+  const pinned = new Set(layout.pinned || []);
+  if (pinned.delete(oldId)) pinned.add(newId);
+  const pinnedNodes = { ...(layout.pinned_nodes || {}) };
+  if (pinnedNodes[oldId] && !pinnedNodes[newId]) pinnedNodes[newId] = pinnedNodes[oldId];
+  delete pinnedNodes[oldId];
+  return {
+    layout: {
+      ...layout,
+      positions,
+      pinned: Array.from(pinned).sort(),
+      pinned_nodes: pinnedNodes,
+    },
+    changed: true,
+  };
+}
+
 export function anchorNewPositions(generated, merged, saved, current, edges) {
   const positions = { ...(merged || {}) };
   const existing = new Set([

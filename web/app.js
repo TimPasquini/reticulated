@@ -4,15 +4,17 @@ import {
   clearPinnedLayout,
   elkLayerBound,
   hybridBusPositions,
+  inferredRouteNodeId,
   liveSemanticGroup,
   mergeLivePositions,
+  migrateLayoutNodeId,
   orthogonalSegmentGeometry,
   pruneLiveLayout,
   radialClusterPosition,
   rememberedPinnedRmapNodes,
   rememberLivePosition,
   shouldAutoSolveLiveLayout,
-} from "./live-layout.mjs?v=6";
+} from "./live-layout.mjs?v=7";
 
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },
@@ -465,7 +467,15 @@ function liveRenderModel(snapshot) {
         addedDestinationNodes.add(display.id);
       }
       if ((edge.unknown_hops > 0) || edge.route_conflict) {
-        const ghostId = "ghost-segment:" + edge.id;
+        const ghostId = inferredRouteNodeId(edge, display.id);
+        const legacyGhostId = "ghost-segment:" + edge.id;
+        const migrated = migrateLayoutNodeId(
+          state.liveSavedLayout, legacyGhostId, ghostId
+        );
+        if (migrated.changed) {
+          state.liveSavedLayout = migrated.layout;
+          state.livePinned = new Set(migrated.layout.pinned || []);
+        }
         const ghost = {
           id: ghostId,
           unknown_hops: edge.unknown_hops,
@@ -479,7 +489,10 @@ function liveRenderModel(snapshot) {
             ? ((edge.unknown_hops > 0 ? edge.unknown_hops + " unexplained hop" + (edge.unknown_hops === 1 ? "" : "s") : "conflicting hop counts") + "\nroute uncertainty")
             : edge.unknown_hops + " unknown intermediate\nhop" + (edge.unknown_hops === 1 ? "" : "s"),
         };
-        destinationNodes.push({ kind: "ghost_segment", item: ghost });
+        if (!addedDestinationNodes.has(ghostId)) {
+          destinationNodes.push({ kind: "ghost_segment", item: ghost });
+          addedDestinationNodes.add(ghostId);
+        }
         pathEdges.push({ ...edge, id: edge.id + ":unknown", target: ghostId, kind: "unknown_segment" });
         pathEdges.push({ ...edge, id: edge.id + ":completion", source: ghostId, target: display.id, kind: "ghost_completion", hops: 1, unknown_hops: 0 });
       } else {
