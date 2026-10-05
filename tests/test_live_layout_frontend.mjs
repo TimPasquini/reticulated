@@ -7,6 +7,8 @@ import {
   clearPinnedLayout,
   elkLayerBound,
   hybridBusPositions,
+  clusteredForkPositions,
+  liveSemanticGroup,
   mergeLivePositions,
   orthogonalSegmentGeometry,
   pruneLiveLayout,
@@ -15,6 +17,23 @@ import {
   rememberedPinnedRmapNodes,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("live nodes receive useful semantic cluster keys", () => {
+  assert.equal(liveSemanticGroup("interface", { type: "I2PInterface" }), "interface:i2p");
+  assert.equal(liveSemanticGroup("interface", { name: "NYC Backbone" }), "interface:backbone");
+  assert.equal(liveSemanticGroup("destination", { announce_aspect: "lxmf.delivery" }), "service:lxmf");
+  assert.equal(liveSemanticGroup("ghost_segment", { unknown_hops: 3 }), "path:3");
+});
+
+test("clustered forks pack categories ahead of a hub instead of around its perimeter", () => {
+  const packed = clusteredForkPositions({ x: 0, y: 0 }, new Map([
+    ["service:lxmf", ["lxmf-1", "lxmf-2", "lxmf-3", "lxmf-4"]],
+    ["service:rnsh", ["rnsh-1", "rnsh-2"]],
+  ]), 0);
+  assert.ok(Object.values(packed).every((point) => point.x >= 390));
+  assert.ok(Math.abs(packed["lxmf-1"].y - packed["lxmf-2"].y) < 400);
+  assert.ok(Math.abs(packed["lxmf-1"].y - packed["rnsh-1"].y) > 200);
+});
 
 test("radial spoke continuations fan in their parent's outward direction", () => {
   const east = radialFanPosition({ x: 100, y: 0 }, 0, 1, 0, 200, 100);
@@ -122,7 +141,7 @@ test("hybrid layout keeps unknown-hop ghosts in spokes instead of transfer buses
   ) < 500);
 });
 
-test("a radial ghost ring extends destinations away from the hub", () => {
+test("unknown-hop branches pack by depth and extend destinations away from the hub", () => {
   const ghosts = Array.from({ length: 16 }, (_, index) => "ghost-" + index);
   const destinations = ghosts.map((_, index) => "destination-" + index);
   const result = hybridBusPositions([
@@ -153,6 +172,7 @@ test("a radial ghost ring extends destinations away from the hub", () => {
     };
     assert.ok(ghostVector.x * continuation.x + ghostVector.y * continuation.y > 0);
   });
+  assert.ok(ghosts.every((ghost) => result.positions[ghost].y < 0));
 });
 
 test("a pinned RMAP node is rehydrated when its active route disappears", () => {

@@ -4,13 +4,14 @@ import {
   clearPinnedLayout,
   elkLayerBound,
   hybridBusPositions,
+  liveSemanticGroup,
   mergeLivePositions,
   orthogonalSegmentGeometry,
   pruneLiveLayout,
   radialClusterPosition,
   rememberedPinnedRmapNodes,
   rememberLivePosition,
-} from "./live-layout.mjs?v=4";
+} from "./live-layout.mjs?v=5";
 
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },
@@ -274,6 +275,10 @@ const cy = cytoscape({
     { selector: "node.metadata-rf", style: { "background-color": "#9a7529" }},
     { selector: "node.metadata-messaging", style: { "background-color": "#39734f" }},
     { selector: "node.metadata-service", style: { "background-color": "#7651a6" }},
+    { selector: "node.live-layout-hub", style: {
+      "border-width": 4, "border-color": "#8fb7ca", "underlay-color": "#6da2ba",
+      "underlay-padding": 12, "underlay-opacity": 0.12, "font-size": 11, "z-index": 10,
+    }},
     { selector: "node.live-pinned", style: {
       "border-width": 5, "border-color": "#ffd34d",
       "underlay-color": "#ffd34d", "underlay-padding": 7, "underlay-opacity": 0.16,
@@ -2662,11 +2667,25 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
   );
   const liveNodes = cy.nodes("[liveKind]");
   const graphNodes = liveNodes.map((node) => ({
-    id: node.id(), kind: node.data("liveKind"),
+    id: node.id(),
+    kind: node.data("liveKind"),
+    item: node.data("item") || {},
+    semanticGroup: liveSemanticGroup(node.data("liveKind"), node.data("item") || {}),
   }));
   const graphEdges = cy.edges("[liveKind]").map((edge) => ({
     id: edge.id(), source: edge.source().id(), target: edge.target().id(),
   }));
+  const connectivity = new Map(graphNodes.map((node) => [node.id, 0]));
+  graphEdges.forEach((edge) => {
+    connectivity.set(edge.source, (connectivity.get(edge.source) || 0) + 1);
+    connectivity.set(edge.target, (connectivity.get(edge.target) || 0) + 1);
+  });
+  liveNodes.forEach((node) => {
+    const kind = node.data("liveKind");
+    const degree = connectivity.get(node.id()) || 0;
+    node.toggleClass("live-layout-hub", degree >= 8 ||
+      (["root", "interface", "transport", "rmap_transport"].includes(kind) && degree >= 3));
+  });
 
   let layoutPositions = seeded;
   let busEdgeIds = new Set();
@@ -2720,7 +2739,7 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
     });
     layout.one("layoutstop", () => {
       finish(state.liveLayoutMode === "hybrid_bus"
-        ? "hybrid transfer buses + radial spokes"
+        ? "hybrid transfer buses + semantic fork clusters"
         : "radial topology clusters");
     });
     layout.run();

@@ -92,6 +92,78 @@ export function radialFanPosition(
   };
 }
 
+export function liveSemanticGroup(kind, item = {}) {
+  const text = [
+    item.type, item.interface_type, item.name, item.display_name,
+    item.announce_aspect, ...(item.announce_aspects || []),
+    item.local_service && item.local_service.type,
+    item.local_service && item.local_service.name,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (kind === "ghost_segment") {
+    const hops = Number(item.unknown_hops || item.hop_delta);
+    return "path:" + (Number.isFinite(hops) && hops > 0 ? String(hops) : "unknown");
+  }
+  if (kind === "destination_group") return "path:" + String(item.hop_tier || "unknown");
+  if (kind === "interface") {
+    if (/i2p/.test(text)) return "interface:i2p";
+    if (/rnode|lora|radio/.test(text)) return "interface:radio";
+    if (/backbone|boundary|tcp/.test(text)) return "interface:backbone";
+    if (/auto/.test(text)) return "interface:auto";
+    if (/local|shared/.test(text)) return "interface:local";
+    return "interface:other";
+  }
+  if (kind === "destination" || kind === "announce_identity") {
+    if (/lxmf/.test(text)) return "service:lxmf";
+    if (/rnsh/.test(text)) return "service:rnsh";
+    if (/probe/.test(text)) return "service:probe";
+    if (/topology/.test(text)) return "service:topology";
+    const aspect = String(item.announce_aspect || (item.announce_aspects || [])[0] || "");
+    return "service:" + (aspect.split(".")[0] || "other");
+  }
+  if (kind === "rmap_transport" || kind === "persisted_rmap") return "transit:rmap";
+  if (kind === "transport") return "transit:next-hop";
+  if (kind === "root") return "transit:reporter";
+  return kind || "other";
+}
+
+export function clusteredForkPositions(anchor, groups, directionAngle, options = {}) {
+  const forward = { x: Math.cos(directionAngle), y: Math.sin(directionAngle) };
+  const lateral = { x: -forward.y, y: forward.x };
+  const cellDepth = options.cellDepth || 170;
+  const cellWidth = options.cellWidth || 145;
+  const stem = options.stem || 390;
+  const gap = options.gap || 190;
+  const prepared = Array.from(groups.entries()).sort(([left], [right]) =>
+    left.localeCompare(right)
+  ).map(([key, ids]) => {
+    const columns = Math.max(1, Math.ceil(Math.sqrt(ids.length)));
+    const rows = Math.max(1, Math.ceil(ids.length / columns));
+    return {
+      key, ids: ids.slice().sort(), columns, rows,
+      width: Math.max(220, (rows - 1) * cellWidth + 120),
+    };
+  });
+  const totalWidth = prepared.reduce((sum, group) => sum + group.width, 0) +
+    Math.max(0, prepared.length - 1) * gap;
+  let cursor = -totalWidth / 2;
+  const result = {};
+  for (const group of prepared) {
+    const groupCenter = cursor + group.width / 2;
+    group.ids.forEach((id, index) => {
+      const column = Math.floor(index / group.rows);
+      const row = index % group.rows;
+      const side = groupCenter + (row - (group.rows - 1) / 2) * cellWidth;
+      const depth = stem + column * cellDepth;
+      result[id] = {
+        x: anchor.x + forward.x * depth + lateral.x * side,
+        y: anchor.y + forward.y * depth + lateral.y * side,
+      };
+    });
+    cursor += group.width + gap;
+  }
+  return result;
+}
+
 export function orthogonalSegmentGeometry(section) {
   const bends = (section && section.bendPoints) || [];
   const start = section && section.startPoint;
@@ -263,18 +335,62 @@ export function hybridBusPositions(nodes, edges, initialPositions, pinnedIds) {
     if (!children.has(parent)) children.set(parent, []);
     children.get(parent).push(node.id);
   }
-  for (const [parent, ids] of children) {
+  const branchGroupMemo = new Map();
+  const branchGroup = (id, visiting = new Set()) => {
+    if (branchGroupMemo.has(id)) return branchGroupMemo.get(id);
+    const node = nodeById.get(id) || {};
+    const own = node.semanticGroup || liveSemanticGroup(node.kind, node.item || {});
+    if (visiting.has(id)) return own;
+    const nextVisiting = new Set(visiting).add(id);
+    const descendantGroups = Array.from(new Set((children.get(id) || []).map((child) =>
+      branchGroup(child, nextVisiting)
+    ))).sort();
+    // Unknown-hop bodies are more useful when grouped first by depth and then
+    // by the service eventually reached through that uncertainty.
+    const group = node.kind === "ghost_segment" && descendantGroups.length
+      ? own + "/" + descendantGroups.join("+")
+      : own;
+    branchGroupMemo.set(id, group);
+    return group;
+  };
+  const anchorCenter = averagePoint(anchors.map((id) => positions[id]).filter(Boolean));
+  const parentDepth = (id) => {
+    let depth = 0;
+    const seen = new Set();
+    while (parentByNode.has(id) && !seen.has(id)) {
+      seen.add(id);
+      id = parentByNode.get(id);
+      depth += 1;
+    }
+    return depth;
+  };
+  const orderedChildren = Array.from(children.entries()).sort(([left], [right]) =>
+    parentDepth(left) - parentDepth(right) || left.localeCompare(right)
+  );
+  for (const [parent, ids] of orderedChildren) {
     const anchor = positions[parent] || averagePoint(ids.map((id) => positions[id]).filter(Boolean));
     const upstream = parentByNode.get(parent);
     const upstreamPosition = upstream && positions[upstream];
-    const outwardAngle = upstreamPosition
+    let outwardAngle = upstreamPosition
       ? Math.atan2(anchor.y - upstreamPosition.y, anchor.x - upstreamPosition.x)
       : null;
+    if (outwardAngle === null) {
+      const awayX = anchor.x - anchorCenter.x;
+      const awayY = anchor.y - anchorCenter.y;
+      outwardAngle = Math.hypot(awayX, awayY) > 1
+        ? Math.atan2(awayY, awayX)
+        : -Math.PI / 2;
+    }
+    const groups = new Map();
+    ids.forEach((id) => {
+      const key = branchGroup(id);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(id);
+    });
+    const packed = clusteredForkPositions(anchor, groups, outwardAngle);
     ids.sort();
-    ids.forEach((id, index) => {
-      positions[id] = outwardAngle !== null && ids.length <= 24
-        ? radialFanPosition(anchor, index, ids.length, outwardAngle, 210, 110)
-        : radialClusterPosition(anchor, index, 210, 110, Math.PI / 2);
+    ids.forEach((id) => {
+      positions[id] = packed[id];
     });
   }
 
