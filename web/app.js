@@ -15,6 +15,7 @@ import {
   rememberLivePosition,
   shouldAutoSolveLiveLayout,
 } from "./live-layout.mjs?v=7";
+import { buildGeographicTopology } from "./live-map.mjs?v=1";
 
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },
@@ -65,6 +66,7 @@ const state = {
   liveMapLayers: null,
   liveMapHasInitialView: false,
   liveMapSignature: null,
+  liveMapOpenNodeId: null,
   liveLayoutPending: true,
   liveLayoutRunning: false,
   liveLayoutMode: localStorage.getItem("reticulated.live-layout-mode") || "hybrid_bus",
@@ -949,13 +951,6 @@ function updateLivePinButton() {
     ? "Clear pins (" + state.livePinned.size + ")" : "Clear pins";
 }
 
-function validCoordinate(latitude, longitude) {
-  const lat = Number(latitude);
-  const lon = Number(longitude);
-  return Number.isFinite(lat) && Number.isFinite(lon) &&
-    lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
-}
-
 function liveMapViewportKey() {
   return "reticulated.live-map." + liveLayoutScope();
 }
@@ -995,15 +990,72 @@ function ensureLiveMap() {
   return state.liveMap;
 }
 
-function rmapRecordLabel(record) {
-  return record.name || record.interface_name || record.transport_id || "RMAP node";
-}
-
 function mapHopStyle(hops) {
   if (hops === 1) return { color: "#3b82f6", weight: 3, dashArray: null };
   if (hops === 2) return { color: "#10b981", weight: 2, dashArray: "7 5" };
   if (hops === 3) return { color: "#f59e0b", weight: 2, dashArray: "7 5" };
   return { color: "#a855f7", weight: 2, dashArray: "7 6" };
+}
+
+function mapNodeStyle(kind, actual) {
+  const styles = {
+    root: [actual ? "#f2c94c" : "#8b5cf6", 9],
+    interface: ["#38bdf8", 7],
+    transport: ["#22c55e", 7],
+    rmap_transport: ["#14b8a6", 7],
+    local_service: ["#c084fc", 6],
+    announced_identity: ["#eab308", 6],
+    announced_destination: ["#eab308", 6],
+    destination_group: ["#f59e0b", 6],
+    ghost_segment: ["#a855f7", 6],
+  };
+  const [fillColor, radius] = styles[kind] || ["#94a3b8", 5];
+  return {
+    radius: actual ? radius + 1 : radius,
+    color: actual ? "#f8fafc" : fillColor,
+    weight: actual ? 2.5 : 1.5,
+    fillColor,
+    fillOpacity: actual ? 0.95 : 0.72,
+    dashArray: actual ? null : "3 3",
+  };
+}
+
+function mapNodeLabel(node) {
+  const item = node.item || {};
+  if (node.kind === "ghost_segment") return item.label || "Unknown intermediate hops";
+  if (node.kind === "destination_group") return item.label || "Path summary";
+  if (node.kind === "announced_identity") {
+    return (item.announce_aspects || []).join(", ") || "Announced identity";
+  }
+  if (node.kind === "announced_destination" || node.kind === "local_service") {
+    return item.announce_aspect || item.local_service?.name || node.label;
+  }
+  return node.label || item.display_name || item.name || item.hash || node.id;
+}
+
+function mapTopologyEdgeStyle(edge) {
+  if (edge.kind === "rmap_attachment") {
+    const observed = edge.certainty === "observed";
+    return { color: "#22d3ee", weight: observed ? 4 : 3, opacity: 0.88, dashArray: observed ? null : "8 6" };
+  }
+  const incomplete = edge.certainty === "incomplete" ||
+    edge.kind === "unknown_segment" || edge.kind === "ghost_completion" ||
+    edge.kind === "rmap_reachability" && Number(edge.hops) > 1;
+  if (incomplete) return { ...mapHopStyle(Number(edge.hops)), opacity: 0.75 };
+  return { color: "#5b8196", weight: 2.5, opacity: 0.76, dashArray: null };
+}
+
+function mapTopologyEdgeLabel(edge) {
+  if (edge.kind === "rmap_attachment") {
+    return edge.certainty === "observed" ? "Observed one-hop RMAP attachment" : "Advertised one-hop RMAP attachment";
+  }
+  if (edge.kind === "unknown_segment") return liveEdgeLabel(edge);
+  if (edge.kind === "ghost_completion") return "Announced destination beyond unknown intermediate topology";
+  if (edge.kind === "rmap_reachability") {
+    return edge.hops + "-hop RMAP reachability" + (edge.hops > 1 ? " · intermediate transports unknown" : " · direct");
+  }
+  if (edge.kind === "known_path") return liveEdgeLabel(edge) || "Known path evidence";
+  return String(edge.kind || "Observed relationship").replaceAll("_", " ");
 }
 
 function renderLiveMap(snapshot) {
@@ -1013,117 +1065,70 @@ function renderLiveMap(snapshot) {
     summary.textContent = "Map library could not be loaded.";
     return;
   }
+  const renderModel = liveRenderModel(snapshot);
+  const topology = buildGeographicTopology(snapshot, renderModel);
   const mapSignature = JSON.stringify({
-    records: (snapshot.rmap_interfaces || []).map((item) => [
-      item.id, item.transport_id, item.latitude, item.longitude, item.hops, item.status,
-    ]),
-    matches: (snapshot.rmap_matches || []).map((item) => [
-      item.interface_id, item.transport_id, item.latitude, item.longitude,
-    ]),
-    attachments: (snapshot.rmap_attachments || []).map((item) => [
-      item.source, item.target, item.interface_online,
+    nodes: topology.nodes.map((node) => [node.id, node.kind, mapNodeLabel(node)]),
+    edges: topology.edges.map((edge) => [edge.id, edge.source, edge.target, edge.kind, edge.hops]),
+    locations: Array.from(topology.locations.entries()).map(([id, item]) => [
+      id, item.latitude, item.longitude, item.actual, item.anchorId,
     ]),
   });
   if (mapSignature === state.liveMapSignature) return;
   state.liveMapSignature = mapSignature;
+  const reopenNodeId = state.liveMapOpenNodeId;
   state.liveMapLayers.clearLayers();
-  const roots = snapshot.reporter_roots || [snapshot.root];
-  const rootIds = new Set(roots.map((root) => String(root.transport_id || "")));
-  const rootByReporter = new Map(roots.map((root) => [root.reporter_id, root]));
-  const defaultRoot = snapshot.root || roots[0] || {};
-  const recordsByTransport = new Map();
-  for (const record of snapshot.rmap_interfaces || []) {
-    if (!validCoordinate(record.latitude, record.longitude)) continue;
-    const transportId = String(record.transport_id || record.id || "");
-    if (!transportId) continue;
-    if (!recordsByTransport.has(transportId)) recordsByTransport.set(transportId, []);
-    recordsByTransport.get(transportId).push(record);
-  }
-
-  const coordinates = new Map();
   const bounds = [];
-  for (const [transportId, records] of recordsByTransport) {
-    const record = records[0];
-    const latlng = [Number(record.latitude), Number(record.longitude)];
-    coordinates.set("transport:" + transportId, latlng);
-    bounds.push(latlng);
-    const isReporter = rootIds.has(transportId);
-    const marker = L.circleMarker(latlng, {
-      radius: isReporter ? 9 : 6,
-      color: isReporter ? "#f2c94c" : "#dbeafe",
-      weight: isReporter ? 3 : 2,
-      fillColor: isReporter ? "#8b5cf6" : "#16a085",
-      fillOpacity: 0.92,
-    });
-    const reporters = Array.from(new Set(records.map((item) => item.reporter_id).filter(Boolean)));
-    marker.bindPopup('<div class="live-map-popup"><strong>' + escapeHtml(rmapRecordLabel(record)) +
-      '</strong><span class="mono">' + escapeHtml(transportId) + '</span>' +
-      '<div>' + escapeHtml(record.type || "RMAP interface") + '</div>' +
-      '<div>' + latlng[0].toFixed(5) + ", " + latlng[1].toFixed(5) + '</div>' +
-      (reporters.length ? '<div>Reported by: ' + escapeHtml(reporters.join(", ")) + '</div>' : "") +
-      '<div class="muted">Location supplied by RMAP</div></div>');
-    marker.addTo(state.liveMapLayers);
-  }
-
-  for (const match of snapshot.rmap_matches || []) {
-    if (!validCoordinate(match.latitude, match.longitude)) continue;
-    coordinates.set(match.interface_id, [Number(match.latitude), Number(match.longitude)]);
-  }
-
-  const drawn = new Set();
-  for (const attachment of snapshot.rmap_attachments || []) {
-    const source = coordinates.get(attachment.source);
-    const target = coordinates.get(attachment.target) || (
-      validCoordinate(attachment.latitude, attachment.longitude)
-        ? [Number(attachment.latitude), Number(attachment.longitude)] : null
-    );
+  let mappedEdges = 0;
+  const nodeById = new Map(topology.nodes.map((node) => [node.id, node]));
+  for (const edge of topology.edges) {
+    const source = topology.locations.get(edge.source);
+    const target = topology.locations.get(edge.target);
     if (!source || !target) continue;
-    const key = attachment.source + "|" + attachment.target;
-    if (drawn.has(key)) continue;
-    drawn.add(key);
-    L.polyline([source, target], {
-      color: attachment.interface_online === true ? "#3b82f6" : "#94a3b8",
-      weight: attachment.interface_online === true ? 3 : 2,
-      opacity: 0.8,
-      dashArray: attachment.interface_online === true ? null : "7 7",
-    }).bindTooltip(
-      attachment.interface_online === true ? "Observed one-hop attachment" : "Configured one-hop attachment"
+    mappedEdges += 1;
+    L.polyline([
+      [source.latitude, source.longitude], [target.latitude, target.longitude],
+    ], mapTopologyEdgeStyle(edge)).bindTooltip(
+      mapTopologyEdgeLabel(edge)
     ).addTo(state.liveMapLayers);
   }
-
-  const routeCandidates = new Map();
-  for (const record of snapshot.rmap_interfaces || []) {
-    const root = rootByReporter.get(record.reporter_id) || defaultRoot;
-    const sourceId = root.transport_id ? "transport:" + root.transport_id : null;
-    const targetId = record.transport_id ? "transport:" + record.transport_id : null;
-    const source = sourceId ? coordinates.get(sourceId) : null;
-    const target = targetId ? coordinates.get(targetId) : null;
-    const hops = Number(record.hops);
-    if (!source || !target || !Number.isFinite(hops) || hops < 1 || sourceId === targetId) continue;
-    const key = sourceId + "|" + targetId;
-    const existing = routeCandidates.get(key);
-    if (!existing || hops < existing.hops) {
-      routeCandidates.set(key, { source, target, hops, reporter: root.label || record.reporter_id });
+  for (const [id, location] of topology.locations) {
+    const node = nodeById.get(id);
+    if (!node) continue;
+    const latlng = [location.latitude, location.longitude];
+    if (location.actual) bounds.push(latlng);
+    const marker = L.circleMarker(latlng, mapNodeStyle(node.kind, location.actual));
+    const anchor = nodeById.get(location.anchorId);
+    const item = node.item || {};
+    const hash = item.hash || item.transport_id || item.identity_hash || item.interface_hash;
+    marker.bindPopup('<div class="live-map-popup"><strong>' + escapeHtml(mapNodeLabel(node)) +
+      '</strong>' + (hash ? '<span class="mono">' + escapeHtml(hash) + '</span>' : "") +
+      '<div>' + escapeHtml(String(node.kind || "node").replaceAll("_", " ")) + '</div>' +
+      (location.actual
+        ? '<div>' + location.latitude.toFixed(5) + ", " + location.longitude.toFixed(5) + '</div><div class="muted">Location supplied by RMAP</div>'
+        : '<div class="muted">Schematic placement · ' + location.distance + " graph hop" + (location.distance === 1 ? "" : "s") +
+          ' from ' + escapeHtml(anchor ? mapNodeLabel(anchor) : location.anchorId) + "</div>") +
+      '</div>');
+    marker.bindTooltip(mapNodeLabel(node), { direction: "top", opacity: 0.85 });
+    marker.on("popupopen", () => { state.liveMapOpenNodeId = id; });
+    marker.on("popupclose", () => {
+      if (state.liveMapOpenNodeId === id) state.liveMapOpenNodeId = null;
+    });
+    marker.addTo(state.liveMapLayers);
+    if (id === reopenNodeId) {
+      marker.openPopup();
+      state.liveMapOpenNodeId = id;
     }
   }
-  for (const [key, route] of routeCandidates) {
-    if (drawn.has(key)) continue;
-    drawn.add(key);
-    const style = mapHopStyle(route.hops);
-    L.polyline([route.source, route.target], {
-      ...style, opacity: 0.78,
-    }).bindTooltip(
-      route.hops + "-hop RMAP reachability from " + route.reporter +
-      (route.hops > 1 ? " · intermediate transports unknown" : " · direct")
-    ).addTo(state.liveMapLayers);
-  }
 
-  summary.innerHTML = '<strong>' + recordsByTransport.size + " geolocated RMAP node" +
-    (recordsByTransport.size === 1 ? "" : "s") + "</strong> · " + drawn.size +
-    " mapped relationship" + (drawn.size === 1 ? "" : "s") +
-    '<div class="map-legend"><span class="hop-1">1 hop</span><span class="hop-2">2 hops</span>' +
-    '<span class="hop-3">3 hops</span><span class="hop-4">4+ hops</span></div>' +
-    '<div class="muted">Multi-hop lines show reachability, not invented intermediate routers. Unlocated nodes are not assigned coordinates.</div>';
+  summary.innerHTML = '<strong>' + topology.actualCount + " geographic anchor" +
+    (topology.actualCount === 1 ? "" : "s") + "</strong> · " + topology.syntheticCount +
+    " schematic neighbor" + (topology.syntheticCount === 1 ? "" : "s") + " · " +
+    mappedEdges + " mapped topology relationship" + (mappedEdges === 1 ? "" : "s") +
+    (topology.omittedCount ? " · " + topology.omittedCount + " disconnected/unlocated omitted" : "") +
+    '<div class="map-legend"><span class="hop-1">observed / 1 hop</span><span class="hop-2">2 hops</span>' +
+    '<span class="hop-3">3 hops</span><span class="hop-4">4+ / unknown</span></div>' +
+    '<div class="muted">Solid-outline nodes have RMAP coordinates. Dashed-outline nodes are schematic topology clustered near their closest geographic anchor; their plotted position is not a location claim.</div>';
   if (!state.liveMapHasInitialView) {
     state.liveMapHasInitialView = true;
     if (!restoreLiveMapViewport() && bounds.length) {
