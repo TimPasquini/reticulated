@@ -11,9 +11,24 @@ import {
   orthogonalSegmentGeometry,
   pruneLiveLayout,
   radialClusterPosition,
+  radialFanPosition,
   rememberedPinnedRmapNodes,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("radial spoke continuations fan in their parent's outward direction", () => {
+  const east = radialFanPosition({ x: 100, y: 0 }, 0, 1, 0, 200, 100);
+  const north = radialFanPosition({ x: 0, y: -100 }, 0, 1, -Math.PI / 2, 200, 100);
+  const fan = Array.from({ length: 5 }, (_, index) =>
+    radialFanPosition({ x: 0, y: 0 }, index, 5, 0, 200, 100)
+  );
+
+  assert.deepEqual(east, { x: 300, y: 0 });
+  assert.ok(Math.abs(north.x) < 0.000001);
+  assert.equal(north.y, -300);
+  assert.ok(new Set(fan.map((point) => point.y.toFixed(3))).size > 1);
+  assert.ok(fan.every((point) => point.x > 150));
+});
 
 test("ELK layer bounds spread large hub layers across both axes", () => {
   assert.equal(elkLayerBound(4), 8);
@@ -105,6 +120,39 @@ test("hybrid layout keeps unknown-hop ghosts in spokes instead of transfer buses
     result.positions.destination.x - result.positions.ghost.x,
     result.positions.destination.y - result.positions.ghost.y,
   ) < 500);
+});
+
+test("a radial ghost ring extends destinations away from the hub", () => {
+  const ghosts = Array.from({ length: 16 }, (_, index) => "ghost-" + index);
+  const destinations = ghosts.map((_, index) => "destination-" + index);
+  const result = hybridBusPositions([
+    { id: "west", kind: "interface" },
+    { id: "east", kind: "interface" },
+    { id: "hub", kind: "transport" },
+    ...ghosts.map((id) => ({ id, kind: "ghost_segment" })),
+    ...destinations.map((id) => ({ id, kind: "destination" })),
+  ], [
+    { id: "west-hub", source: "west", target: "hub" },
+    { id: "east-hub", source: "east", target: "hub" },
+    ...ghosts.flatMap((ghost, index) => [
+      { id: "hub-ghost-" + index, source: "hub", target: ghost },
+      { id: "ghost-destination-" + index, source: ghost, target: destinations[index] },
+    ]),
+  ], Object.fromEntries([
+    ["west", { x: -800, y: 0 }], ["east", { x: 800, y: 0 }],
+    ["hub", { x: 0, y: 0 }],
+    ...ghosts.concat(destinations).map((id) => [id, { x: 0, y: 0 }]),
+  ]), new Set(["west", "east"]));
+
+  ghosts.forEach((ghost, index) => {
+    const ghostVector = result.positions[ghost];
+    const destination = result.positions[destinations[index]];
+    const continuation = {
+      x: destination.x - ghostVector.x,
+      y: destination.y - ghostVector.y,
+    };
+    assert.ok(ghostVector.x * continuation.x + ghostVector.y * continuation.y > 0);
+  });
 });
 
 test("a pinned RMAP node is rehydrated when its active route disappears", () => {

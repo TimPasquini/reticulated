@@ -73,6 +73,25 @@ export function radialClusterPosition(
   };
 }
 
+export function radialFanPosition(
+  anchor, index, count, directionAngle, baseRadius = 210, spacing = 110
+) {
+  const safeCount = Math.max(1, count);
+  const perRing = 12;
+  const ring = Math.floor(index / perRing);
+  const ringIndex = index % perRing;
+  const ringCount = Math.min(perRing, safeCount - ring * perRing);
+  const arc = Math.min(Math.PI * 0.8, Math.max(0, (ringCount - 1) * 0.24));
+  const angle = ringCount === 1
+    ? directionAngle
+    : directionAngle - arc / 2 + arc * ringIndex / (ringCount - 1);
+  const radius = baseRadius + ring * spacing;
+  return {
+    x: anchor.x + Math.cos(angle) * radius,
+    y: anchor.y + Math.sin(angle) * radius,
+  };
+}
+
 export function orthogonalSegmentGeometry(section) {
   const bends = (section && section.bendPoints) || [];
   const start = section && section.startPoint;
@@ -227,6 +246,7 @@ export function hybridBusPositions(nodes, edges, initialPositions, pinnedIds) {
   // placed predecessor. Grouping first gives each hub a bounded golden-angle
   // fan instead of a long horizontal destination row.
   const children = new Map();
+  const parentByNode = new Map();
   for (const node of nodes || []) {
     if (pinned.has(node.id) || busNodeIds.has(node.id)) continue;
     const candidates = (incoming.get(node.id) || []).filter((id) => positions[id]);
@@ -239,14 +259,22 @@ export function hybridBusPositions(nodes, edges, initialPositions, pinnedIds) {
       return rightPlaced - leftPlaced || degree(right) - degree(left) || left.localeCompare(right);
     });
     const parent = neighbors[0];
+    parentByNode.set(node.id, parent);
     if (!children.has(parent)) children.set(parent, []);
     children.get(parent).push(node.id);
   }
   for (const [parent, ids] of children) {
     const anchor = positions[parent] || averagePoint(ids.map((id) => positions[id]).filter(Boolean));
+    const upstream = parentByNode.get(parent);
+    const upstreamPosition = upstream && positions[upstream];
+    const outwardAngle = upstreamPosition
+      ? Math.atan2(anchor.y - upstreamPosition.y, anchor.x - upstreamPosition.x)
+      : null;
     ids.sort();
     ids.forEach((id, index) => {
-      positions[id] = radialClusterPosition(anchor, index, 210, 110, Math.PI / 2);
+      positions[id] = outwardAngle !== null && ids.length <= 24
+        ? radialFanPosition(anchor, index, ids.length, outwardAngle, 210, 110)
+        : radialClusterPosition(anchor, index, 210, 110, Math.PI / 2);
     });
   }
 

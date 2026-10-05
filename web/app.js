@@ -10,7 +10,7 @@ import {
   radialClusterPosition,
   rememberedPinnedRmapNodes,
   rememberLivePosition,
-} from "./live-layout.mjs?v=3";
+} from "./live-layout.mjs?v=4";
 
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },
