@@ -11,6 +11,7 @@ from sim.rns_reporting import (
     RNSReportListener,
     decode_report,
     encode_report,
+    encode_report_chunks,
     load_allowlist,
     start_report_listener,
 )
@@ -136,6 +137,41 @@ class RNSReportingTests(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         self.assertEqual(registry.list()[0]["id"], "fedora")
+
+    def test_listener_atomically_reassembles_bounded_chunks(self):
+        identity_hash = "ab" * 16
+        registry = LiveReportRegistry()
+        listener = RNSReportListener(
+            registry,
+            identity_path="unused",
+            allowlist_path="unused",
+            local_reporter_id="patroon",
+            max_bytes=1024 * 1024,
+        )
+        listener.allowlist = {
+            identity_hash: {"reporter_id": "fedora", "label": "Fedora laptop"}
+        }
+        report = snapshot()
+        report["destinations"] = [{
+            "id": f"destination:{index:08x}",
+            "hash": (f"{index:08x}" * 4),
+        } for index in range(2000)]
+        chunks = encode_report_chunks("fedora", "Fedora", report, chunk_bytes=1024)
+        self.assertGreater(len(chunks), 1)
+
+        for index, chunk in enumerate(chunks):
+            response = listener._handle_report(
+                "/report/v1", chunk, b"request", b"link",
+                SimpleNamespace(hash=bytes.fromhex(identity_hash)), 0,
+            )
+            self.assertTrue(response["ok"])
+            if index < len(chunks) - 1:
+                self.assertFalse(response["complete"])
+                self.assertEqual(registry.list(), [])
+
+        self.assertEqual(registry.list()[0]["id"], "fedora")
+        stored = registry.get("fedora", include_paths=True)
+        self.assertEqual(len(stored["destinations"]), 2000)
 
 
 if __name__ == "__main__":

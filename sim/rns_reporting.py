@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -22,13 +23,18 @@ REQUEST_PATH = "/report/v1"
 PROTOCOL_VERSION = 1
 DEFAULT_MAX_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+DEFAULT_CHUNK_BYTES = 256 * 1024
+DEFAULT_CHUNK_EXPANDED_BYTES = 8 * 1024 * 1024
+MAX_REPORT_CHUNKS = 256
+CHUNK_TTL = 300.0
+MAX_INFLIGHT_TRANSFERS = 8
 
 
 def encode_report(reporter_id: str, label: str, snapshot: dict[str, Any]) -> dict[str, Any]:
     """Build the MessagePack-safe envelope passed to ``Link.request``."""
     validate_reporter_id(reporter_id)
     validate_snapshot(snapshot)
-    payload = json.dumps(
+    raw = json.dumps(
         snapshot, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
     return {
@@ -37,8 +43,45 @@ def encode_report(reporter_id: str, label: str, snapshot: dict[str, Any]) -> dic
         "label": str(label)[:128],
         "sent_at": time.time(),
         "encoding": "gzip-json",
-        "payload": gzip.compress(payload, compresslevel=6),
+        "uncompressed_size": len(raw),
+        "payload": gzip.compress(raw, compresslevel=6),
     }
+
+
+def encode_report_chunks(
+    reporter_id: str, label: str, snapshot: dict[str, Any], *,
+    chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+) -> list[dict[str, Any]]:
+    """Encode a report as one envelope or bounded pieces of one gzip stream."""
+    if chunk_bytes < 1024:
+        raise ValueError("report chunk size must be at least 1024 bytes")
+    envelope = encode_report(reporter_id, label, snapshot)
+    payload = envelope["payload"]
+    expanded_size = int(envelope["uncompressed_size"])
+    chunk_count = max(
+        (len(payload) + chunk_bytes - 1) // chunk_bytes,
+        (expanded_size + DEFAULT_CHUNK_EXPANDED_BYTES - 1) // DEFAULT_CHUNK_EXPANDED_BYTES,
+    )
+    if chunk_count <= 1:
+        return [envelope]
+    total = chunk_count
+    if total > MAX_REPORT_CHUNKS:
+        raise ValueError("compressed report requires too many chunks")
+    slice_bytes = (len(payload) + total - 1) // total
+    transfer_id = hashlib.sha256(payload).hexdigest()
+    return [{
+        "version": PROTOCOL_VERSION,
+        "reporter_id": reporter_id,
+        "label": str(label)[:128],
+        "sent_at": envelope["sent_at"],
+        "encoding": "gzip-json-chunk",
+        "transfer_id": transfer_id,
+        "chunk_index": index,
+        "chunk_count": total,
+        "compressed_size": len(payload),
+        "uncompressed_size": expanded_size,
+        "payload": payload[index * slice_bytes:(index + 1) * slice_bytes],
+    } for index in range(total)]
 
 
 def decode_report(
@@ -147,6 +190,8 @@ class RNSReportListener:
         self.identity: RNS.Identity | None = None
         self.allowlist: dict[str, dict[str, str]] = {}
         self._stop = threading.Event()
+        self._chunk_lock = threading.Lock()
+        self._chunk_transfers: dict[tuple[str, str], dict[str, Any]] = {}
 
     @property
     def destination_hash(self) -> str | None:
@@ -216,22 +261,109 @@ class RNSReportListener:
             enrollment = self.allowlist.get(identity_hash)
             if enrollment is None:
                 raise ValueError("reporter identity is not enrolled")
-            reporter_id, snapshot = decode_report(
-                data,
-                max_bytes=self.max_bytes,
-                max_uncompressed_bytes=self.max_uncompressed_bytes,
-            )
-            if reporter_id != enrollment["reporter_id"]:
+            claimed_reporter_id = validate_reporter_id(str(
+                data.get("reporter_id") if isinstance(data, dict) else ""
+            ))
+            if claimed_reporter_id != enrollment["reporter_id"]:
                 raise ValueError("reporter ID does not match enrolled identity")
+            if isinstance(data, dict) and data.get("encoding") == "gzip-json-chunk":
+                reporter_id, snapshot, progress = self._accept_chunk(identity_hash, data)
+            else:
+                reporter_id, snapshot = decode_report(
+                    data,
+                    max_bytes=self.max_bytes,
+                    max_uncompressed_bytes=self.max_uncompressed_bytes,
+                )
+                progress = None
+            if reporter_id != claimed_reporter_id:
+                raise ValueError("reporter ID does not match enrolled identity")
+            if snapshot is None:
+                return {
+                    "ok": True,
+                    "version": PROTOCOL_VERSION,
+                    "reporter_id": reporter_id,
+                    "complete": False,
+                    **(progress or {}),
+                }
             self.registry.update(reporter_id, snapshot)
             return {
                 "ok": True,
                 "version": PROTOCOL_VERSION,
                 "reporter_id": reporter_id,
+                "complete": True,
                 "received_at": time.time(),
+                **(progress or {}),
             }
         except (AttributeError, ValueError) as exc:
             return {"ok": False, "version": PROTOCOL_VERSION, "error": str(exc)[:256]}
+
+    def _accept_chunk(
+        self, identity_hash: str, envelope: dict[str, Any]
+    ) -> tuple[str, dict[str, Any] | None, dict[str, int]]:
+        if envelope.get("version") != PROTOCOL_VERSION:
+            raise ValueError("unsupported report protocol version")
+        reporter_id = validate_reporter_id(str(envelope.get("reporter_id") or ""))
+        transfer_id = str(envelope.get("transfer_id") or "")
+        if len(transfer_id) != 64 or any(character not in "0123456789abcdef" for character in transfer_id):
+            raise ValueError("invalid report transfer ID")
+        try:
+            index = int(envelope.get("chunk_index"))
+            count = int(envelope.get("chunk_count"))
+            compressed_size = int(envelope.get("compressed_size"))
+            uncompressed_size = int(envelope.get("uncompressed_size"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid report chunk metadata") from exc
+        payload = envelope.get("payload")
+        if (
+            not isinstance(payload, bytes) or not 0 <= index < count
+            or count < 1 or count > MAX_REPORT_CHUNKS
+            or compressed_size < 1 or compressed_size > self.max_bytes
+            or uncompressed_size < 1 or uncompressed_size > self.max_uncompressed_bytes
+            or len(payload) > DEFAULT_CHUNK_BYTES
+        ):
+            raise ValueError("invalid report chunk")
+        now = time.monotonic()
+        key = (identity_hash, transfer_id)
+        with self._chunk_lock:
+            self._chunk_transfers = {
+                item_key: item for item_key, item in self._chunk_transfers.items()
+                if now - item["updated_at"] <= CHUNK_TTL
+            }
+            if key not in self._chunk_transfers and len(self._chunk_transfers) >= MAX_INFLIGHT_TRANSFERS:
+                raise ValueError("too many incomplete report transfers")
+            transfer = self._chunk_transfers.setdefault(key, {
+                "reporter_id": reporter_id,
+                "count": count,
+                "compressed_size": compressed_size,
+                "uncompressed_size": uncompressed_size,
+                "parts": {},
+                "updated_at": now,
+            })
+            if (
+                transfer["reporter_id"] != reporter_id or transfer["count"] != count
+                or transfer["compressed_size"] != compressed_size
+                or transfer["uncompressed_size"] != uncompressed_size
+            ):
+                raise ValueError("inconsistent report chunk metadata")
+            transfer["parts"][index] = payload
+            transfer["updated_at"] = now
+            if sum(len(part) for part in transfer["parts"].values()) > compressed_size:
+                del self._chunk_transfers[key]
+                raise ValueError("report chunks exceed declared size")
+            received = len(transfer["parts"])
+            if received != count:
+                return reporter_id, None, {"chunks_received": received, "chunk_count": count}
+            compressed = b"".join(transfer["parts"][part] for part in range(count))
+            del self._chunk_transfers[key]
+        if len(compressed) != compressed_size or hashlib.sha256(compressed).hexdigest() != transfer_id:
+            raise ValueError("report chunk checksum mismatch")
+        decoded_id, snapshot = decode_report({
+            "version": PROTOCOL_VERSION,
+            "reporter_id": reporter_id,
+            "encoding": "gzip-json",
+            "payload": compressed,
+        }, max_bytes=self.max_bytes, max_uncompressed_bytes=self.max_uncompressed_bytes)
+        return decoded_id, snapshot, {"chunks_received": count, "chunk_count": count}
 
 
 async def start_report_listener(listener: RNSReportListener) -> str:
@@ -287,7 +419,15 @@ class RNSReportClient:
         if self.identity is None:
             self.start()
         link = self._ensure_link()
-        envelope = encode_report(reporter_id, label, snapshot)
+        envelopes = encode_report_chunks(reporter_id, label, snapshot)
+        response: dict[str, Any] = {}
+        for envelope in envelopes:
+            response = self._send_envelope(link, envelope)
+        return response
+
+    def _send_envelope(
+        self, link: RNS.Link, envelope: dict[str, Any]
+    ) -> dict[str, Any]:
         complete = threading.Event()
         result: dict[str, Any] = {}
 

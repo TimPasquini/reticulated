@@ -20,6 +20,26 @@ from .live_rns import LiveRNSProvider
 from .rns_reporting import RNSReportClient, load_or_create_identity
 
 
+def compact_snapshot_for_report(snapshot: dict) -> dict:
+    """Remove redundant source objects while retaining normalized current state.
+
+    Path and RMAP entries already expose every field Reticulated consumes. Their
+    ``raw`` member is the same source dictionary a second time, which can double
+    a large route table on the wire. Interface/root raw telemetry is retained
+    because it contains evolving diagnostics not otherwise normalized.
+    """
+    compact = dict(snapshot)
+    compact["destinations"] = [
+        {key: value for key, value in item.items() if key != "raw"}
+        for item in snapshot.get("destinations", [])
+    ]
+    compact["rmap_interfaces"] = [
+        {key: value for key, value in item.items() if key != "raw"}
+        for item in snapshot.get("rmap_interfaces", [])
+    ]
+    return compact
+
+
 def report_url(server: str, reporter_id: str) -> str:
     parsed = urllib.parse.urlsplit(server)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -140,18 +160,24 @@ def main() -> None:
     try:
         while True:
             snapshot = provider.collect()
+            report_snapshot = compact_snapshot_for_report(snapshot)
             try:
+                response = None
                 if rns_client is not None:
-                    rns_client.send_report(args.reporter_id, args.label, snapshot)
+                    response = rns_client.send_report(
+                        args.reporter_id, args.label, report_snapshot
+                    )
                 else:
                     assert args.server is not None and token is not None
-                    send_report(args.server, args.reporter_id, token, snapshot)
+                    send_report(args.server, args.reporter_id, token, report_snapshot)
                 announce_count = len(snapshot.get("announces", {}).get("events", []))
+                chunk_count = int((response or {}).get("chunk_count") or 1)
                 print(
                     f"reported {args.reporter_id}: "
                     f"{len(snapshot['interfaces'])} interfaces, "
                     f"{len(snapshot['destinations'])} destinations, "
-                    f"{announce_count} announce events",
+                    f"{announce_count} announce events, "
+                    f"{chunk_count} transfer chunk{'s' if chunk_count != 1 else ''}",
                     flush=True,
                 )
             except (

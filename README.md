@@ -174,9 +174,14 @@ does not assign invented hashes or claim false router adjacencies. Conflicting
 hop observations remain visible as route uncertainty instead of silently
 choosing one report.
 
-The reporter gzip-compresses normalized `rnstatus -j`, `rnpath -t -j`,
-`rnstatus -d -j`, and its bounded announce-event buffer inside a versioned RNS request. RNS automatically
-uses a Resource when a snapshot is larger than one packet. The listener accepts
+The reporter sends the current normalized `rnstatus -j`, `rnpath -t -j`, and
+`rnstatus -d -j` state plus its bounded recent announce-event buffer. It removes
+redundant raw copies of path and RMAP records before gzip compression while
+retaining evolving root/interface telemetry. Large gzip streams are divided
+into bounded, checksummed RNS requests; the listener reassembles and validates
+the entire transfer before atomically replacing the reporter's prior snapshot.
+Missing or expired chunks never create partial topology. RNS automatically
+uses a Resource when an individual chunk is larger than one packet. The listener accepts
 only identified peers in its allowlist and verifies that the claimed reporter
 ID matches the identity's enrollment. The reporter never invokes interface
 management or other mutating RNS commands. Reports are kept in memory and
