@@ -167,6 +167,7 @@ async def lifespan(app):
             local_reporter_id=config.LIVE_RNS_REPORTER_ID,
             config_dir=config.LIVE_RNS_CONFIG_DIR,
             max_bytes=config.LIVE_REPORT_MAX_BYTES,
+            max_uncompressed_bytes=config.LIVE_REPORT_MAX_UNCOMPRESSED_BYTES,
             announce_interval=config.LIVE_RNS_INGEST_ANNOUNCE_INTERVAL,
         )
         destination_hash = await start_report_listener(rns_report_listener)
@@ -389,11 +390,17 @@ def _decode_report_body(raw: bytes, content_encoding: str | None) -> dict:
             raise HTTPException(status_code=415, detail="only gzip content encoding is supported")
         try:
             with gzip.GzipFile(fileobj=io.BytesIO(raw)) as source:
-                raw = source.read(config.LIVE_REPORT_MAX_BYTES + 1)
+                raw = source.read(config.LIVE_REPORT_MAX_UNCOMPRESSED_BYTES + 1)
         except (OSError, EOFError) as exc:
             raise HTTPException(status_code=400, detail="invalid gzip report") from exc
-    if len(raw) > config.LIVE_REPORT_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="uncompressed report is too large")
+    if len(raw) > config.LIVE_REPORT_MAX_UNCOMPRESSED_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "uncompressed report is too large "
+                f"(limit {config.LIVE_REPORT_MAX_UNCOMPRESSED_BYTES} bytes)"
+            ),
+        )
     try:
         report = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:

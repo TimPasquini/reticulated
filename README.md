@@ -69,6 +69,8 @@ Optional live-mode settings are:
 - `LIVE_REPORT_CACHE_FILE`: persistent latest-report cache, including complete
   path and RMAP data
 - `LIVE_REPORT_CACHE_INTERVAL`: minimum seconds between compressed cache writes
+- `LIVE_REPORT_MAX_BYTES`: maximum compressed reporter request size (default 16 MiB)
+- `LIVE_REPORT_MAX_UNCOMPRESSED_BYTES`: maximum expanded reporter JSON size (default 64 MiB)
   (default `300`; in-memory data still updates immediately)
 - `LIVE_ANNOUNCE_CAPTURE_ENABLED`: attach a read-only announce handler to the
   existing shared RNS instance (default `true`)

@@ -31,6 +31,9 @@ LIVE_RNS_REPORTER_ID = os.environ.get("LIVE_RNS_REPORTER_ID", socket.gethostname
 LIVE_REPORT_TOKEN = os.environ.get("RETICULATED_REPORT_TOKEN")
 LIVE_REPORT_STALE_AFTER = float(os.environ.get("LIVE_REPORT_STALE_AFTER", "90"))
 LIVE_REPORT_MAX_BYTES = int(os.environ.get("LIVE_REPORT_MAX_BYTES", str(16 * 1024 * 1024)))
+LIVE_REPORT_MAX_UNCOMPRESSED_BYTES = int(os.environ.get(
+    "LIVE_REPORT_MAX_UNCOMPRESSED_BYTES", str(64 * 1024 * 1024)
+))
 LIVE_REPORT_CACHE_FILE = os.environ.get(
     "LIVE_REPORT_CACHE_FILE", os.path.join(DATA_DIR, "live-reports.json.gz")
 )

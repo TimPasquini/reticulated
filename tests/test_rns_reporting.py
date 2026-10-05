@@ -63,6 +63,20 @@ class RNSReportingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "uncompressed report is too large"):
             decode_report(encode_report("fedora", "Fedora", report), max_bytes=200)
 
+    def test_compressed_and_expanded_report_limits_are_independent(self):
+        report = snapshot()
+        report["root"]["padding"] = "compressible topology " * 1000
+        envelope = encode_report("fedora", "Fedora", report)
+
+        reporter_id, decoded = decode_report(
+            envelope, max_bytes=1024, max_uncompressed_bytes=64 * 1024
+        )
+
+        self.assertEqual(reporter_id, "fedora")
+        self.assertEqual(decoded["root"]["padding"], report["root"]["padding"])
+        with self.assertRaisesRegex(ValueError, "uncompressed report is too large"):
+            decode_report(envelope, max_bytes=1024, max_uncompressed_bytes=1024)
+
     def test_allowlist_binds_identity_hash_to_reporter(self):
         identity_hash = "ab" * 16
         with tempfile.TemporaryDirectory() as directory:

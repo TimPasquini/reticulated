@@ -21,6 +21,7 @@ DESTINATION_ASPECTS = ("topology", "ingest")
 REQUEST_PATH = "/report/v1"
 PROTOCOL_VERSION = 1
 DEFAULT_MAX_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 
 
 def encode_report(reporter_id: str, label: str, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -41,7 +42,8 @@ def encode_report(reporter_id: str, label: str, snapshot: dict[str, Any]) -> dic
 
 
 def decode_report(
-    envelope: Any, *, max_bytes: int = DEFAULT_MAX_BYTES
+    envelope: Any, *, max_bytes: int = DEFAULT_MAX_BYTES,
+    max_uncompressed_bytes: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Decode a bounded report envelope and return its claimed ID and snapshot."""
     if not isinstance(envelope, dict):
@@ -56,13 +58,16 @@ def decode_report(
         raise ValueError("report payload must be bytes")
     if len(payload) > max_bytes:
         raise ValueError("compressed report is too large")
+    expanded_limit = max_bytes if max_uncompressed_bytes is None else max_uncompressed_bytes
     try:
         with gzip.GzipFile(fileobj=io.BytesIO(payload)) as source:
-            raw = source.read(max_bytes + 1)
+            raw = source.read(expanded_limit + 1)
     except (OSError, EOFError) as exc:
         raise ValueError("invalid gzip report") from exc
-    if len(raw) > max_bytes:
-        raise ValueError("uncompressed report is too large")
+    if len(raw) > expanded_limit:
+        raise ValueError(
+            f"uncompressed report is too large (limit {expanded_limit} bytes)"
+        )
     try:
         snapshot = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -127,6 +132,7 @@ class RNSReportListener:
         local_reporter_id: str,
         config_dir: str | None = None,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
         announce_interval: float = 300.0,
     ) -> None:
         self.registry = registry
@@ -135,6 +141,7 @@ class RNSReportListener:
         self.local_reporter_id = local_reporter_id
         self.config_dir = config_dir
         self.max_bytes = max_bytes
+        self.max_uncompressed_bytes = max_uncompressed_bytes
         self.announce_interval = announce_interval
         self.destination: RNS.Destination | None = None
         self.identity: RNS.Identity | None = None
@@ -209,7 +216,11 @@ class RNSReportListener:
             enrollment = self.allowlist.get(identity_hash)
             if enrollment is None:
                 raise ValueError("reporter identity is not enrolled")
-            reporter_id, snapshot = decode_report(data, max_bytes=self.max_bytes)
+            reporter_id, snapshot = decode_report(
+                data,
+                max_bytes=self.max_bytes,
+                max_uncompressed_bytes=self.max_uncompressed_bytes,
+            )
             if reporter_id != enrollment["reporter_id"]:
                 raise ValueError("reporter ID does not match enrolled identity")
             self.registry.update(reporter_id, snapshot)
