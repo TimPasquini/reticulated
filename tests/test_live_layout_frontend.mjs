@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   anchorNewPositions,
   captureLayoutState,
+  clearPinnedLayout,
   hybridBusPositions,
   mergeLivePositions,
   pruneLiveLayout,
@@ -11,6 +12,19 @@ import {
   rememberedPinnedRmapNodes,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("clearing pins also retires hidden pinned RMAP metadata", () => {
+  const cleared = clearPinnedLayout({
+    positions: { visible: { x: 1, y: 2 }, hidden: { x: -3, y: 4 } },
+    pinned: ["visible", "hidden"],
+    pinned_nodes: { hidden: { hash: "abc" } },
+    viewport: { zoom: 1 },
+  });
+
+  assert.deepEqual(cleared.pinned, []);
+  assert.deepEqual(cleared.pinned_nodes, {});
+  assert.deepEqual(cleared.positions.hidden, { x: -3, y: 4 });
+});
 
 test("hybrid bus layout preserves pins and places transit nodes between anchors", () => {
   const result = hybridBusPositions([

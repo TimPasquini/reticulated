@@ -1,6 +1,7 @@
 import {
   anchorNewPositions,
   captureLayoutState,
+  clearPinnedLayout,
   hybridBusPositions,
   mergeLivePositions,
   pruneLiveLayout,
@@ -258,6 +259,12 @@ const cy = cytoscape({
     { selector: "node.live-destination-group.hop-2", style: { "background-color": "#23694f", "border-color": "#2eb67d", "color": "#e6fff5" }},
     { selector: "node.live-destination-group.hop-3", style: { "background-color": "#80501f", "border-color": "#df8422", "color": "#fff0dc" }},
     { selector: "node.live-destination-group.hop-deep", style: { "background-color": "#57327d", "border-color": "#9b51e0", "color": "#f2e7ff", "opacity": 0.78 }},
+    { selector: "node.metadata-backbone", style: { "background-color": "#2876a8" }},
+    { selector: "node.metadata-lan", style: { "background-color": "#278077" }},
+    { selector: "node.metadata-i2p", style: { "background-color": "#81549c" }},
+    { selector: "node.metadata-rf", style: { "background-color": "#9a7529" }},
+    { selector: "node.metadata-messaging", style: { "background-color": "#39734f" }},
+    { selector: "node.metadata-service", style: { "background-color": "#7651a6" }},
     { selector: "node.live-pinned", style: {
       "border-width": 5, "border-color": "#ffd34d",
       "underlay-color": "#ffd34d", "underlay-padding": 7, "underlay-opacity": 0.16,
@@ -341,6 +348,25 @@ function liveInterfaceClass(item) {
   if (descriptor.indexOf("rnode") >= 0 || descriptor.indexOf("lora") >= 0) return " rf";
   if (descriptor.indexOf("i2p") >= 0) return " i2p";
   if (descriptor.indexOf("backbone") >= 0 || descriptor.indexOf("boundary") >= 0) return " backbone";
+  return "";
+}
+
+function liveMetadataClass(item, records = []) {
+  const service = item.local_service || {};
+  const text = [
+    item.type, item.name, item.display_name, item.short_name, item.interface,
+    service.type, service.name, item.announce_aspect,
+    ...(item.announce_aspects || []),
+    ...records.filter(Boolean).flatMap((record) => [record.type, record.name]),
+  ].filter(Boolean).join(" ").toLowerCase();
+  // More specific physical/overlay media take precedence over generic
+  // service words that may also appear in an advertised node name.
+  if (/rnode|lora|radio/.test(text)) return " metadata-rf";
+  if (/i2p/.test(text)) return " metadata-i2p";
+  if (/backbone|boundary|tcpclient|tcpserver/.test(text)) return " metadata-backbone";
+  if (/autointerface|localinterface|localclient| lan\b/.test(text)) return " metadata-lan";
+  if (/lxmf|nomadnet|sideband/.test(text)) return " metadata-messaging";
+  if (/rnsh|probe_responder|probe responder|topology_ingest/.test(text)) return " metadata-service";
   return "";
 }
 
@@ -866,10 +892,14 @@ async function refreshLiveLayouts() {
 
 function updateLivePinButton() {
   const button = document.getElementById("btn-live-pin");
+  const clearButton = document.getElementById("btn-live-clear-pins");
   const selected = cy.nodes("[liveKind]:selected");
   button.disabled = state.uiMode !== "live" || selected.length !== 1;
   button.textContent = selected.length === 1 && state.livePinned.has(selected[0].id())
     ? "Unpin node" : "Pin node";
+  clearButton.disabled = state.uiMode !== "live" || state.livePinned.size === 0;
+  clearButton.textContent = state.livePinned.size
+    ? "Clear pins (" + state.livePinned.size + ")" : "Clear pins";
 }
 
 function validCoordinate(latitude, longitude) {
@@ -1121,6 +1151,7 @@ function rebuildLive(snapshot) {
     let classes = "live-root" + (root.primary ? " primary" : " secondary");
     if (rmapRecords.length) classes += " rmap-matched rmap-identified";
     if (root.report_stale) classes += " stale";
+    classes += liveMetadataClass(root, rmapRecords);
     els.push({ group: "nodes", data: { id: root.id, label: label, liveKind: "root", item: { ...root, rmap_records: rmapRecords } }, classes: classes, position: positions[root.id] });
   }
   for (const item of snapshot.interfaces || []) {
@@ -1130,6 +1161,7 @@ function rebuildLive(snapshot) {
     if (item.path_only) classes += " path-only";
     if (rmapMatches.length) classes += " rmap-matched";
     if (rmapRecords.length) classes += " rmap-identified";
+    classes += liveMetadataClass(item, rmapRecords);
     const rmapLabel = rmapRecords.length
       ? "◆ RMAP · " + (rmapRecords[0].name || rmapRecords[0].type || "identified") + "\n"
       : (rmapMatches.length ? "RMAP endpoint: " + (rmapMatches[0].name || "matched") + "\n" : "");
@@ -1145,7 +1177,7 @@ function rebuildLive(snapshot) {
     const rmapLabel = rmapRecords.length ? "◆ RMAP · " + (rmapRecords[0].name || rmapRecords[0].type || "matched") + "\n" : "";
     const transportItem = { ...item, rmap_records: rmapRecords };
     const announceLabel = item.announce_inferred ? "announce next hop\n" : "next hop\n";
-    els.push({ group: "nodes", data: { id: item.id, label: rmapLabel + announceLabel + shortHash(item.hash) + countLabel, liveKind: "transport", item: transportItem }, classes: "live-transport" + (rmapRecords.length ? " rmap-matched rmap-identified" : "") + (item.announce_inferred ? " announce-inferred" : ""), position: positions[item.id] });
+    els.push({ group: "nodes", data: { id: item.id, label: rmapLabel + announceLabel + shortHash(item.hash) + countLabel, liveKind: "transport", item: transportItem }, classes: "live-transport" + (rmapRecords.length ? " rmap-matched rmap-identified" : "") + (item.announce_inferred ? " announce-inferred" : "") + liveMetadataClass(item, rmapRecords), position: positions[item.id] });
   }
   const existingNodeIds = new Set(els.filter((element) => element.group === "nodes").map((element) => element.data.id));
   const existingObservedPairs = new Set(renderModel.edges.map((edge) => edge.source + "|" + edge.target));
@@ -1165,7 +1197,7 @@ function rebuildLive(snapshot) {
       const offset = slot === 0 ? 0 : direction * Math.ceil(slot / 2) * 150;
       positions[transportId] = positions[transportId] || { x: interfacePosition.x + offset, y: interfacePosition.y + 160 };
       const transportItem = { id: transportId, hash: match.transport_id, rmap: true, rmap_records: [match.record] };
-      els.push({ group: "nodes", data: { id: transportId, label: "◆ RMAP NODE\n" + (match.name || shortHash(match.transport_id)), liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport rmap-identified", position: positions[transportId] });
+      els.push({ group: "nodes", data: { id: transportId, label: "◆ RMAP NODE\n" + (match.name || shortHash(match.transport_id)), liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport rmap-identified" + liveMetadataClass(transportItem, [match.record]), position: positions[transportId] });
       existingNodeIds.add(transportId);
     }
     const pair = match.interface_id + "|" + transportId;
@@ -1182,7 +1214,8 @@ function rebuildLive(snapshot) {
     const rmapPrefix = rmapRecords.length
       ? "◆ RMAP · " + (rmapRecords[0].name || rmapRecords[0].type || "identified") + "\n"
       : "";
-    const rmapClass = rmapRecords.length ? " rmap-identified" : "";
+    const rmapClass = (rmapRecords.length ? " rmap-identified" : "") +
+      (entry.kind === "destination_group" ? "" : liveMetadataClass(item, rmapRecords));
     const displayItem = rmapRecords.length ? { ...item, rmap_records: rmapRecords } : item;
     if (entry.kind === "destination_group") {
       els.push({ group: "nodes", data: { id: item.id, label: rmapPrefix + item.label, liveKind: "destination_group", item: displayItem }, classes: "live-destination-group" + liveHopClass(item.hops, item.hop_tier) + rmapClass, position: positions[item.id] });
@@ -1229,7 +1262,8 @@ function rebuildLive(snapshot) {
         liveKind: "persisted_rmap",
         item: item,
       },
-      classes: "live-rmap-transport rmap-identified live-rmap-persisted",
+      classes: "live-rmap-transport rmap-identified live-rmap-persisted" +
+        liveMetadataClass(item, item.rmap_records),
       position: position,
     });
   }
@@ -1408,7 +1442,13 @@ function showLivePanel(el) {
     body.innerHTML = '<div class="muted">Read-only local Reticulum observations. Select an item for details.</div>' +
       '<div class="live-key"><span class="live-swatch"></span><span class="muted">solid: directly supported relationship</span>' +
       '<span class="live-swatch incomplete"></span><span class="muted">dashed: unknown intermediate hops</span>' +
-      '<span class="muted">ghost nodes: required but unidentified topology</span></div>';
+      '<span class="live-swatch metadata-backbone"></span><span class="muted">backbone / TCP metadata</span>' +
+      '<span class="live-swatch metadata-lan"></span><span class="muted">LAN / local metadata</span>' +
+      '<span class="live-swatch metadata-i2p"></span><span class="muted">I2P metadata</span>' +
+      '<span class="live-swatch metadata-rf"></span><span class="muted">RF / LoRa metadata</span>' +
+      '<span class="live-swatch metadata-messaging"></span><span class="muted">messaging application metadata</span>' +
+      '<span class="live-swatch metadata-service"></span><span class="muted">known service metadata</span>' +
+      '<span class="live-swatch ghost"></span><span class="muted">ghost: required but unidentified topology</span></div>';
     return;
   }
   const item = el.data("item") || {};
@@ -2100,6 +2140,22 @@ document.getElementById("btn-live-pin").onclick = () => {
   rememberLiveNodePosition(selected[0]);
   applyLivePins();
   scheduleLiveAutosave();
+};
+document.getElementById("btn-live-clear-pins").onclick = async () => {
+  if (!state.livePinned.size) return;
+  state.livePinned.clear();
+  if (state.liveSavedLayout) {
+    state.liveSavedLayout = clearPinnedLayout(state.liveSavedLayout);
+  }
+  // Route-less RMAP anchors only exist because their pin made them durable.
+  // Remove them immediately instead of waiting for a graph-signature change.
+  cy.nodes(".live-rmap-persisted").remove();
+  applyLivePins();
+  try {
+    await saveLiveLayout("__autosave__", true);
+  } catch (error) {
+    scheduleLiveAutosave();
+  }
 };
 document.getElementById("btn-live-save-layout").onclick = async () => {
   const name = window.prompt("Layout name:");

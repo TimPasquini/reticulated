@@ -45,6 +45,13 @@ button:disabled { opacity: 0.45; cursor: default; }
 .live-key { display: grid; grid-template-columns: 14px 1fr; gap: 5px 8px; align-items: center; margin-top: 12px; }
 .live-swatch { width: 11px; height: 11px; border-radius: 50%; background: #718096; }
 .live-swatch.incomplete { width: 14px; height: 0; border-radius: 0; border-top: 2px dashed #d89b45; }
+.live-swatch.metadata-backbone { background: #2876a8; }
+.live-swatch.metadata-lan { background: #278077; }
+.live-swatch.metadata-i2p { background: #81549c; }
+.live-swatch.metadata-rf { background: #9a7529; }
+.live-swatch.metadata-messaging { background: #39734f; }
+.live-swatch.metadata-service { background: #7651a6; }
+.live-swatch.ghost { background: #382f45; border: 2px dashed #bb86d9; }
 
 #main { display: flex; flex: 1; min-height: 0; }
 #cy { flex: 1; background: #0d1117; }

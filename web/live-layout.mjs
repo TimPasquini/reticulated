@@ -267,6 +267,11 @@ export function captureLayoutState(
   };
 }
 
+export function clearPinnedLayout(layout) {
+  if (!layout) return layout;
+  return { ...layout, pinned: [], pinned_nodes: {} };
+}
+
 export function pruneLiveLayout(layout, activeIds) {
   if (!layout || !layout.positions) return { layout: layout, changed: false };
   const active = activeIds instanceof Set ? activeIds : new Set(activeIds || []);
