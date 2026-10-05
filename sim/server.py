@@ -118,6 +118,7 @@ class PositionsBody(BaseModel):
 class LiveLayoutBody(BaseModel):
     positions: dict = {}
     pinned: list[str] = []
+    pinned_nodes: dict = {}
     viewport: dict | None = None
 
 

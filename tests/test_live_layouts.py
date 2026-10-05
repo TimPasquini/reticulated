@@ -16,6 +16,14 @@ class LiveLayoutStoreTests(unittest.TestCase):
                     "interface:garage": {"x": 40.5, "y": -60.5},
                 },
                 "pinned": ["transport:patroon"],
+                "pinned_nodes": {
+                    "transport:patroon": {
+                        "label": "◆ RMAP · Patroon",
+                        "live_kind": "transport",
+                        "hash": "09985437",
+                        "rmap_records": [{"transport_id": "09985437"}],
+                    }
+                },
                 "viewport": {"zoom": 1.25, "pan": {"x": 5, "y": -8}},
             })
 
@@ -30,6 +38,9 @@ class LiveLayoutStoreTests(unittest.TestCase):
             {"x": 40.5, "y": -60.5},
         )
         self.assertEqual(restored["pinned"], ["transport:patroon"])
+        self.assertEqual(
+            restored["pinned_nodes"]["transport:patroon"]["hash"], "09985437"
+        )
         self.assertEqual(restored["viewport"]["zoom"], 1.25)
 
     def test_autosave_is_not_exposed_as_named_layout(self):
@@ -50,6 +61,14 @@ class LiveLayoutStoreTests(unittest.TestCase):
                     "temporarily-absent": {"x": -30, "y": 40},
                 },
                 "pinned": ["visible", "temporarily-absent"],
+                "pinned_nodes": {
+                    "temporarily-absent": {
+                        "label": "◆ RMAP · remembered",
+                        "live_kind": "transport",
+                        "hash": "deadbeef",
+                        "rmap_records": [{"transport_id": "deadbeef"}],
+                    }
+                },
             })
             overwritten = store.save("all", "Field view", {
                 "positions": {"visible": {"x": 50, "y": 60}},
@@ -60,6 +79,10 @@ class LiveLayoutStoreTests(unittest.TestCase):
         self.assertEqual(
             overwritten["positions"]["temporarily-absent"],
             {"x": -30.0, "y": 40.0},
+        )
+        self.assertEqual(
+            overwritten["pinned_nodes"]["temporarily-absent"]["hash"],
+            "deadbeef",
         )
         self.assertEqual(overwritten["positions"]["visible"], {"x": 50.0, "y": 60.0})
 

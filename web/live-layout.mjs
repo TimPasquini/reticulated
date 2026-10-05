@@ -85,7 +85,9 @@ export function rememberLivePosition(layout, nodeId, position, pinnedIds) {
   };
 }
 
-export function captureLayoutState(layout, visiblePositions, pinnedIds, viewport) {
+export function captureLayoutState(
+  layout, visiblePositions, pinnedIds, viewport, visiblePinnedNodes = {}
+) {
   const positions = { ...(visiblePositions || {}) };
   const previousPositions = (layout || {}).positions || {};
   const pinned = Array.from(pinnedIds || []).sort();
@@ -95,9 +97,15 @@ export function captureLayoutState(layout, visiblePositions, pinnedIds, viewport
     // unpinned nodes remain eligible for pruning.
     if (!positions[id] && previousPositions[id]) positions[id] = previousPositions[id];
   });
+  const pinnedNodes = {};
+  pinned.forEach((id) => {
+    const metadata = visiblePinnedNodes[id] || ((layout || {}).pinned_nodes || {})[id];
+    if (metadata) pinnedNodes[id] = metadata;
+  });
   return {
     positions: positions,
     pinned: pinned.filter((id) => positions[id]),
+    pinned_nodes: pinnedNodes,
     viewport: viewport,
   };
 }
@@ -113,10 +121,28 @@ export function pruneLiveLayout(layout, activeIds) {
     if (active.has(id) || pinned.has(id)) positions[id] = position;
   });
   const retainedPins = (layout.pinned || []).filter((id) => positions[id]);
+  const pinnedNodes = {};
+  retainedPins.forEach((id) => {
+    if ((layout.pinned_nodes || {})[id]) pinnedNodes[id] = layout.pinned_nodes[id];
+  });
   const changed = Object.keys(positions).length !== Object.keys(layout.positions).length ||
-    retainedPins.length !== (layout.pinned || []).length;
+    retainedPins.length !== (layout.pinned || []).length ||
+    Object.keys(pinnedNodes).length !== Object.keys(layout.pinned_nodes || {}).length;
   return {
-    layout: changed ? { ...layout, positions: positions, pinned: retainedPins } : layout,
+    layout: changed ? {
+      ...layout, positions: positions, pinned: retainedPins, pinned_nodes: pinnedNodes,
+    } : layout,
     changed: changed,
   };
+}
+
+export function rememberedPinnedRmapNodes(layout, pinnedIds, activeIds) {
+  const pinned = pinnedIds instanceof Set ? pinnedIds : new Set(pinnedIds || []);
+  const active = activeIds instanceof Set ? activeIds : new Set(activeIds || []);
+  if (!layout) return [];
+  return Object.entries(layout.pinned_nodes || {}).flatMap(([id, metadata]) => {
+    const position = (layout.positions || {})[id];
+    if (!pinned.has(id) || active.has(id) || !position) return [];
+    return [{ id: id, metadata: metadata, position: position }];
+  });
 }

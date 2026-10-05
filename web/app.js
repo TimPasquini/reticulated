@@ -4,6 +4,7 @@ import {
   mergeLivePositions,
   pruneLiveLayout,
   radialClusterPosition,
+  rememberedPinnedRmapNodes,
   rememberLivePosition,
 } from "./live-layout.mjs";
 
@@ -201,6 +202,10 @@ const cy = cytoscape({
       "font-size": 9, "text-wrap": "wrap", "text-max-width": 100, "text-outline-color": "#11151c", "text-outline-width": 2,
     }},
     { selector: "node.live-transport.rmap-matched", style: { "border-width": 3, "border-color": "#56b9bd" }},
+    { selector: "node.rmap-identified", style: {
+      "border-width": 5, "border-color": "#63f3ee",
+      "underlay-color": "#2dd4cf", "underlay-padding": 9, "underlay-opacity": 0.22,
+    }},
     { selector: "node.live-transport.announce-inferred", style: {
       "border-width": 3, "border-style": "dashed", "border-color": "#e4b84a",
     }},
@@ -512,23 +517,51 @@ function liveRenderModel(snapshot) {
     }
   }
   const rmapItems = snapshot.rmap_interfaces || [];
-  const observedTransportIds = new Set((snapshot.transports || []).map((item) => String(item.hash)));
-  (snapshot.reporter_roots || [snapshot.root]).forEach((root) => {
-    if (root.transport_id) observedTransportIds.add(String(root.transport_id));
+  const recordsByKnownHash = new Map();
+  rmapItems.forEach((record) => {
+    [record.transport_id, record.discovery_hash].forEach((value) => {
+      const hash = String(value || "").toLowerCase();
+      if (!hash) return;
+      if (!recordsByKnownHash.has(hash)) recordsByKnownHash.set(hash, []);
+      if (!recordsByKnownHash.get(hash).some((item) => item.id === record.id)) {
+        recordsByKnownHash.get(hash).push(record);
+      }
+    });
   });
   const rmapMatches = {};
   const rmapInterfaceMatches = {};
-  let unmatchedRmapCount = 0;
-  for (const item of rmapItems) {
-    const transportHash = String(item.transport_id || "");
-    if (!observedTransportIds.has(transportHash)) {
-      unmatchedRmapCount += 1;
-      continue;
+  const matchedRecordIds = new Set();
+  const matchNodeHash = (nodeId, hash) => {
+    const records = recordsByKnownHash.get(String(hash || "").toLowerCase()) || [];
+    if (!records.length) return;
+    rmapMatches[nodeId] = records;
+    records.forEach((record) => matchedRecordIds.add(record.id));
+  };
+  (snapshot.reporter_roots || [snapshot.root]).forEach((root) =>
+    matchNodeHash(root.id, root.transport_id)
+  );
+  (snapshot.transports || []).forEach((transport) =>
+    matchNodeHash(transport.id, transport.hash)
+  );
+  (snapshot.interfaces || []).forEach((interfaceItem) =>
+    matchNodeHash(interfaceItem.id, interfaceItem.interface_hash)
+  );
+  destinationNodes.forEach((entry) => {
+    const item = entry.item;
+    const candidateHashes = [
+      item.hash,
+      item.identity_hash,
+      item.announce_identity_hash,
+      ...(item.announce_identity_hashes || []),
+    ];
+    for (const hash of candidateHashes) {
+      if (recordsByKnownHash.has(String(hash || "").toLowerCase())) {
+        matchNodeHash(item.id, hash);
+        break;
+      }
     }
-    const id = "transport:" + transportHash;
-    if (!rmapMatches[id]) rmapMatches[id] = [];
-    rmapMatches[id].push(item);
-  }
+  });
+  const unmatchedRmapCount = rmapItems.filter((record) => !matchedRecordIds.has(record.id)).length;
   for (const match of snapshot.rmap_matches || []) {
     if (!rmapInterfaceMatches[match.interface_id]) rmapInterfaceMatches[match.interface_id] = [];
     rmapInterfaceMatches[match.interface_id].push(match);
@@ -565,6 +598,9 @@ function liveGraphSignature(snapshot, renderModel) {
     rmapMatches: (snapshot.rmap_matches || []).map((item) => [
       item.interface_id, item.rmap_interface_id, item.transport_id,
     ]),
+    identifiedRmapNodes: Object.entries(renderModel.rmapMatches).sort().map(
+      ([id, records]) => [id, records.map((record) => record.id).sort()]
+    ),
   });
 }
 
@@ -675,17 +711,47 @@ function liveLayoutPath(scope, name) {
   return "/api/live/layouts/" + encodeURIComponent(scope) + "/" + encodeURIComponent(name);
 }
 
+function pinnedRmapMetadata(node) {
+  if (!node || !node.nonempty() || !node.hasClass("rmap-identified")) return null;
+  const item = node.data("item") || {};
+  return {
+    label: node.data("label") || "RMAP node",
+    live_kind: node.data("liveKind") || "rmap_transport",
+    hash: item.hash || item.transport_id || item.identity_hash || null,
+    rmap_records: (item.rmap_records || []).slice(0, 20).map((record) => ({
+      id: record.id,
+      discovery_hash: record.discovery_hash,
+      transport_id: record.transport_id,
+      name: record.name,
+      type: record.type,
+      status: record.status,
+      hops: record.hops,
+      last_heard: record.last_heard,
+      latitude: record.latitude,
+      longitude: record.longitude,
+      reachable_on: record.reachable_on,
+      port: record.port,
+      frequency: record.frequency,
+      bandwidth: record.bandwidth,
+    })),
+  };
+}
+
 function captureLiveLayout() {
   const positions = {};
+  const pinnedNodes = {};
   cy.nodes("[liveKind]").forEach((node) => {
     const position = node.position();
     positions[node.id()] = { x: position.x, y: position.y };
+    const metadata = state.livePinned.has(node.id()) ? pinnedRmapMetadata(node) : null;
+    if (metadata) pinnedNodes[node.id()] = metadata;
   });
   return captureLayoutState(
     state.liveSavedLayout,
     positions,
     state.livePinned,
     { zoom: cy.zoom(), pan: { ...cy.pan() } },
+    pinnedNodes,
   );
 }
 
@@ -699,6 +765,11 @@ function rememberLiveNodePosition(node) {
   state.liveSavedLayout = rememberLivePosition(
     state.liveSavedLayout, node.id(), position, state.livePinned
   );
+  const pinnedNodes = { ...(state.liveSavedLayout.pinned_nodes || {}) };
+  const metadata = state.livePinned.has(node.id()) ? pinnedRmapMetadata(node) : null;
+  if (metadata) pinnedNodes[node.id()] = metadata;
+  else delete pinnedNodes[node.id()];
+  state.liveSavedLayout.pinned_nodes = pinnedNodes;
 }
 
 async function saveLiveLayout(name, quiet) {
@@ -1030,36 +1101,46 @@ function rebuildLive(snapshot) {
   const els = [];
   const roots = snapshot.reporter_roots || [snapshot.root];
   const rootIds = new Set(roots.map((root) => root.id));
+  const rmapRecordsForNode = (id) => {
+    const current = renderModel.rmapMatches[id] || [];
+    if (current.length) return current;
+    if (!state.livePinned.has(id)) return [];
+    return (((state.liveSavedLayout || {}).pinned_nodes || {})[id] || {}).rmap_records || [];
+  };
   for (const root of roots) {
     const role = root.primary ? "\nprimary reporter" : "\nreporter";
     const staleLabel = root.report_stale ? "\nstale snapshot" : "";
-    const rmapRecords = renderModel.rmapMatches[root.id] || [];
-    const rmapLabel = rmapRecords.length ? "\nRMAP matched" : "";
-    const label = root.label + (roots.length > 1 ? role : "") + staleLabel + rmapLabel;
+    const rmapRecords = rmapRecordsForNode(root.id);
+    const rmapLabel = rmapRecords.length ? "◆ RMAP\n" : "";
+    const label = rmapLabel + root.label + (roots.length > 1 ? role : "") + staleLabel;
     let classes = "live-root" + (root.primary ? " primary" : " secondary");
-    if (rmapRecords.length) classes += " rmap-matched";
+    if (rmapRecords.length) classes += " rmap-matched rmap-identified";
     if (root.report_stale) classes += " stale";
     els.push({ group: "nodes", data: { id: root.id, label: label, liveKind: "root", item: { ...root, rmap_records: rmapRecords } }, classes: classes, position: positions[root.id] });
   }
   for (const item of snapshot.interfaces || []) {
     const rmapMatches = renderModel.rmapInterfaceMatches[item.id] || [];
+    const rmapRecords = rmapRecordsForNode(item.id);
     let classes = "live-interface" + liveInterfaceClass(item);
     if (item.path_only) classes += " path-only";
     if (rmapMatches.length) classes += " rmap-matched";
-    const rmapLabel = rmapMatches.length ? "\nRMAP: " + (rmapMatches[0].name || "matched") : "";
+    if (rmapRecords.length) classes += " rmap-identified";
+    const rmapLabel = rmapRecords.length
+      ? "◆ RMAP · " + (rmapRecords[0].name || rmapRecords[0].type || "identified") + "\n"
+      : (rmapMatches.length ? "RMAP endpoint: " + (rmapMatches[0].name || "matched") + "\n" : "");
     const interfaceLabel = item.display_name || item.short_name || item.name;
-    els.push({ group: "nodes", data: { id: item.id, label: interfaceLabel + rmapLabel, liveKind: "interface", item: { ...item, rmap_matches: rmapMatches } }, classes: classes, position: positions[item.id] });
+    els.push({ group: "nodes", data: { id: item.id, label: rmapLabel + interfaceLabel, liveKind: "interface", item: { ...item, rmap_matches: rmapMatches, rmap_records: rmapRecords } }, classes: classes, position: positions[item.id] });
   }
   for (const item of snapshot.transports || []) {
     if (rootIds.has(item.id)) continue;
     const transportCounts = (snapshot.path_summary || {}).by_transport || {};
     const destinationCount = transportCounts[item.hash] || 0;
     const countLabel = destinationCount ? "\n" + destinationCount.toLocaleString() + " destinations" : "";
-    const rmapRecords = renderModel.rmapMatches[item.id] || [];
-    const rmapLabel = rmapRecords.length ? "\nRMAP: " + (rmapRecords[0].name || rmapRecords[0].type || "matched") : "";
+    const rmapRecords = rmapRecordsForNode(item.id);
+    const rmapLabel = rmapRecords.length ? "◆ RMAP · " + (rmapRecords[0].name || rmapRecords[0].type || "matched") + "\n" : "";
     const transportItem = { ...item, rmap_records: rmapRecords };
     const announceLabel = item.announce_inferred ? "announce next hop\n" : "next hop\n";
-    els.push({ group: "nodes", data: { id: item.id, label: announceLabel + shortHash(item.hash) + rmapLabel + countLabel, liveKind: "transport", item: transportItem }, classes: "live-transport" + (rmapRecords.length ? " rmap-matched" : "") + (item.announce_inferred ? " announce-inferred" : ""), position: positions[item.id] });
+    els.push({ group: "nodes", data: { id: item.id, label: rmapLabel + announceLabel + shortHash(item.hash) + countLabel, liveKind: "transport", item: transportItem }, classes: "live-transport" + (rmapRecords.length ? " rmap-matched rmap-identified" : "") + (item.announce_inferred ? " announce-inferred" : ""), position: positions[item.id] });
   }
   const existingNodeIds = new Set(els.filter((element) => element.group === "nodes").map((element) => element.data.id));
   const existingObservedPairs = new Set(renderModel.edges.map((edge) => edge.source + "|" + edge.target));
@@ -1079,7 +1160,7 @@ function rebuildLive(snapshot) {
       const offset = slot === 0 ? 0 : direction * Math.ceil(slot / 2) * 150;
       positions[transportId] = positions[transportId] || { x: interfacePosition.x + offset, y: interfacePosition.y + 160 };
       const transportItem = { id: transportId, hash: match.transport_id, rmap: true, rmap_records: [match.record] };
-      els.push({ group: "nodes", data: { id: transportId, label: "RMAP node\n" + (match.name || shortHash(match.transport_id)), liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport", position: positions[transportId] });
+      els.push({ group: "nodes", data: { id: transportId, label: "◆ RMAP NODE\n" + (match.name || shortHash(match.transport_id)), liveKind: "rmap_transport", item: transportItem }, classes: "live-rmap-transport rmap-identified", position: positions[transportId] });
       existingNodeIds.add(transportId);
     }
     const pair = match.interface_id + "|" + transportId;
@@ -1092,26 +1173,60 @@ function rebuildLive(snapshot) {
   }
   for (const entry of renderModel.destinationNodes) {
     const item = entry.item;
+    const rmapRecords = rmapRecordsForNode(item.id);
+    const rmapPrefix = rmapRecords.length
+      ? "◆ RMAP · " + (rmapRecords[0].name || rmapRecords[0].type || "identified") + "\n"
+      : "";
+    const rmapClass = rmapRecords.length ? " rmap-identified" : "";
+    const displayItem = rmapRecords.length ? { ...item, rmap_records: rmapRecords } : item;
     if (entry.kind === "destination_group") {
-      els.push({ group: "nodes", data: { id: item.id, label: item.label, liveKind: "destination_group", item: item }, classes: "live-destination-group" + liveHopClass(item.hops, item.hop_tier), position: positions[item.id] });
+      els.push({ group: "nodes", data: { id: item.id, label: rmapPrefix + item.label, liveKind: "destination_group", item: displayItem }, classes: "live-destination-group" + liveHopClass(item.hops, item.hop_tier) + rmapClass, position: positions[item.id] });
     } else if (entry.kind === "local_service") {
       const service = item.local_service;
       const label = service ? service.name + "\n" + service.type : "Local service\n" + shortHash(item.hash);
-      els.push({ group: "nodes", data: { id: item.id, label: label, liveKind: "destination", item: item }, classes: "live-destination local-service", position: positions[item.id] });
+      els.push({ group: "nodes", data: { id: item.id, label: rmapPrefix + label, liveKind: "destination", item: displayItem }, classes: "live-destination local-service" + rmapClass, position: positions[item.id] });
     } else if (entry.kind === "announced_destination") {
       const aspect = item.announce_aspect || "unclassified announce";
       const hops = item.hops === null || item.hops === undefined ? "unknown route" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
-      els.push({ group: "nodes", data: { id: item.id, label: aspect + "\n" + shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination announced", position: positions[item.id] });
+      els.push({ group: "nodes", data: { id: item.id, label: rmapPrefix + aspect + "\n" + shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: displayItem }, classes: "live-destination announced" + rmapClass, position: positions[item.id] });
     } else if (entry.kind === "announced_identity") {
       const services = (item.destination_hashes || []).length;
       const aspect = (item.announce_aspects || []).join(", ") || "announced identity";
-      els.push({ group: "nodes", data: { id: item.id, label: aspect + "\nidentity " + shortHash(item.identity_hash) + "\n" + services + " destination" + (services === 1 ? "" : "s"), liveKind: "announce_identity", item: item }, classes: "live-destination announced", position: positions[item.id] });
+      els.push({ group: "nodes", data: { id: item.id, label: rmapPrefix + aspect + "\nidentity " + shortHash(item.identity_hash) + "\n" + services + " destination" + (services === 1 ? "" : "s"), liveKind: "announce_identity", item: displayItem }, classes: "live-destination announced" + rmapClass, position: positions[item.id] });
     } else if (entry.kind === "ghost_segment") {
       els.push({ group: "nodes", data: { id: item.id, label: item.label, liveKind: "ghost_segment", item: item }, classes: "live-ghost", position: positions[item.id] });
     } else {
       const hops = item.hops === null || item.hops === undefined ? "? hops" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
-      els.push({ group: "nodes", data: { id: item.id, label: shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: item }, classes: "live-destination", position: positions[item.id] });
+      els.push({ group: "nodes", data: { id: item.id, label: rmapPrefix + shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: displayItem }, classes: "live-destination" + rmapClass, position: positions[item.id] });
     }
+  }
+  const activeNodeIds = new Set(
+    els.filter((element) => element.group === "nodes").map((element) => element.data.id)
+  );
+  for (const remembered of rememberedPinnedRmapNodes(
+    state.liveSavedLayout, state.livePinned, activeNodeIds
+  )) {
+    const { id, metadata, position } = remembered;
+    const item = {
+      id: id,
+      hash: metadata.hash,
+      rmap: true,
+      persisted: true,
+      rmap_records: metadata.rmap_records || [],
+    };
+    els.push({
+      group: "nodes",
+      data: {
+        id: id,
+        label: "◆ RMAP · REMEMBERED\n" + String(
+          metadata.label || shortHash(metadata.hash)
+        ).replace(/^◆ RMAP[^\n]*\n/, ""),
+        liveKind: "persisted_rmap",
+        item: item,
+      },
+      classes: "live-rmap-transport rmap-identified live-rmap-persisted",
+      position: position,
+    });
   }
   for (const edge of renderModel.edges) {
     const incomplete = edge.certainty === "incomplete" || edge.kind === "unknown_segment" || edge.kind === "ghost_completion";
@@ -1334,10 +1449,14 @@ function showLivePanel(el) {
       (item.announce_inferred
         ? '<div class="muted">A received announce recorded this as the next transport at capture time. The dotted attachment is historical evidence, not a claim that the path is still current.</div>'
         : '<div class="muted">The local path table supports this as a next hop. It does not reveal routers beyond it.</div>') + rmapDetails;
-  } else if (kind === "rmap_transport") {
-    title.textContent = "RMAP-discovered transport";
+  } else if (kind === "rmap_transport" || kind === "persisted_rmap") {
+    title.textContent = kind === "persisted_rmap"
+      ? "Remembered RMAP node (no active route)"
+      : "RMAP-discovered transport";
     body.innerHTML = row("Transport hash", item.hash) + row("Announced hops", item.hops) +
-      '<div class="muted">Learned from an RMAP interface-discovery announce. This is not evidence of direct adjacency.</div>';
+      '<div class="muted">' + (kind === "persisted_rmap"
+        ? "Pinned from prior RMAP evidence. It is retained as an anchor, but no reporter currently supplies an active route to it."
+        : "Learned from an RMAP interface-discovery announce. This is not evidence of direct adjacency.") + "</div>";
   } else if (kind === "rmap_interface") {
     title.textContent = item.name || "RMAP-discovered interface";
     body.innerHTML = row("Transport hash", item.transport_id) + row("Type", item.type) + row("Status", item.status) +
@@ -2001,7 +2120,11 @@ document.getElementById("btn-live-load-layout").onclick = async () => {
   const layout = await api.get(liveLayoutPath(liveLayoutScope(), name));
   if (layout && layout.positions) {
     state.liveLayoutSaveGeneration += 1;
-    applyLiveLayout(layout, true);
+    applyLiveLayout(layout, false);
+    // The selected layout may contain remembered RMAP anchors that are not in
+    // the current route snapshot and therefore need to be materialized.
+    state.liveGraphSignature = null;
+    if (state.live) rebuildLive(state.live);
     scheduleLiveAutosave();
   }
 };

@@ -50,6 +50,39 @@ def validate_layout(scope: str, name: str, layout: Any) -> dict[str, Any]:
         isinstance(node_id, str) and node_id in positions for node_id in raw_pinned
     ):
         raise ValueError("live layout pinned IDs must reference saved positions")
+    raw_pinned_nodes = layout.get("pinned_nodes", {})
+    if not isinstance(raw_pinned_nodes, dict) or not all(
+        isinstance(node_id, str)
+        and node_id in raw_pinned
+        and isinstance(metadata, dict)
+        for node_id, metadata in raw_pinned_nodes.items()
+    ):
+        raise ValueError("live layout pinned node metadata must reference pinned IDs")
+    pinned_nodes: dict[str, dict[str, Any]] = {}
+    for node_id, metadata in raw_pinned_nodes.items():
+        label = metadata.get("label")
+        live_kind = metadata.get("live_kind")
+        node_hash = metadata.get("hash")
+        records = metadata.get("rmap_records", [])
+        if (
+            not isinstance(label, str) or len(label) > 512
+            or not isinstance(live_kind, str) or len(live_kind) > 64
+            or node_hash is not None and (
+                not isinstance(node_hash, str) or len(node_hash) > 128
+            )
+            or not isinstance(records, list) or len(records) > 20
+            or not all(isinstance(record, dict) for record in records)
+        ):
+            raise ValueError("invalid live layout pinned node metadata")
+        encoded = json.dumps(records)
+        if len(encoded.encode("utf-8")) > 64 * 1024:
+            raise ValueError("live layout pinned node metadata is too large")
+        pinned_nodes[node_id] = {
+            "label": label,
+            "live_kind": live_kind,
+            "hash": node_hash,
+            "rmap_records": json.loads(encoded),
+        }
     viewport = layout.get("viewport")
     normalized_viewport = None
     if viewport is not None:
@@ -68,6 +101,7 @@ def validate_layout(scope: str, name: str, layout: Any) -> dict[str, Any]:
         "name": name,
         "positions": positions,
         "pinned": sorted(set(raw_pinned)),
+        "pinned_nodes": pinned_nodes,
         "viewport": normalized_viewport,
         "updated_at": time.time(),
     }
@@ -120,6 +154,9 @@ class LiveLayoutStore:
                 if node_id not in normalized["positions"] and node_id in existing_positions:
                     normalized["positions"][node_id] = existing_positions[node_id]
                     retained_pins.add(node_id)
+                    existing_metadata = existing.get("pinned_nodes", {}).get(node_id)
+                    if existing_metadata is not None:
+                        normalized["pinned_nodes"][node_id] = existing_metadata
             if len(normalized["positions"]) > MAX_LAYOUT_NODES:
                 raise ValueError("live layout positions must be an object of reasonable size")
             normalized["pinned"] = sorted(retained_pins)

@@ -7,8 +7,36 @@ import {
   mergeLivePositions,
   pruneLiveLayout,
   radialClusterPosition,
+  rememberedPinnedRmapNodes,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("a pinned RMAP node is rehydrated when its active route disappears", () => {
+  const remembered = rememberedPinnedRmapNodes({
+    positions: { rmapNode: { x: -90, y: 250 } },
+    pinned: ["rmapNode"],
+    pinned_nodes: {
+      rmapNode: {
+        label: "◆ RMAP · Patroon",
+        live_kind: "transport",
+        hash: "09985437",
+        rmap_records: [{ transport_id: "09985437" }],
+      },
+    },
+  }, new Set(["rmapNode"]), new Set());
+
+  assert.equal(remembered.length, 1);
+  assert.equal(remembered[0].metadata.hash, "09985437");
+  assert.deepEqual(remembered[0].position, { x: -90, y: 250 });
+  assert.equal(
+    rememberedPinnedRmapNodes(
+      { positions: { rmapNode: { x: 0, y: 0 } }, pinned_nodes: { rmapNode: {} } },
+      new Set(["rmapNode"]),
+      new Set(["rmapNode"]),
+    ).length,
+    0,
+  );
+});
 
 test("saving retains coordinates and counts for pins absent from the graph", () => {
   const captured = captureLayoutState(
@@ -18,15 +46,33 @@ test("saving retains coordinates and counts for pins absent from the graph", () 
         obsolete: { x: 1, y: 2 },
       },
       pinned: ["hiddenPin"],
+      pinned_nodes: {
+        hiddenPin: {
+          label: "◆ RMAP · Hidden",
+          live_kind: "transport",
+          hash: "abc123",
+          rmap_records: [{ id: "rmap:hidden", transport_id: "abc123" }],
+        },
+      },
     },
     { visiblePin: { x: 300, y: -200 }, visibleLoose: { x: 20, y: 30 } },
     new Set(["hiddenPin", "visiblePin"]),
     { zoom: 1, pan: { x: 0, y: 0 } },
+    {
+      visiblePin: {
+        label: "◆ RMAP · Visible",
+        live_kind: "transport",
+        hash: "def456",
+        rmap_records: [{ id: "rmap:visible", transport_id: "def456" }],
+      },
+    },
   );
 
   assert.deepEqual(captured.pinned, ["hiddenPin", "visiblePin"]);
   assert.deepEqual(captured.positions.hiddenPin, { x: -700, y: 450 });
   assert.deepEqual(captured.positions.visiblePin, { x: 300, y: -200 });
+  assert.equal(captured.pinned_nodes.hiddenPin.hash, "abc123");
+  assert.equal(captured.pinned_nodes.visiblePin.hash, "def456");
   assert.equal(captured.positions.obsolete, undefined);
 });
 
