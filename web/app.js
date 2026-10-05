@@ -15,7 +15,7 @@ import {
   rememberLivePosition,
   shouldAutoSolveLiveLayout,
 } from "./live-layout.mjs?v=7";
-import { buildGeographicTopology } from "./live-map.mjs?v=1";
+import { buildGeographicTopology } from "./live-map.mjs?v=2";
 
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },

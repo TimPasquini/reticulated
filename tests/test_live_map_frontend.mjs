@@ -35,6 +35,8 @@ test("geographic topology anchors RMAP nodes and schematically places connected 
   const topology = buildGeographicTopology(snapshot, renderModel);
 
   assert.equal(topology.locations.get("instance:patroon").actual, true);
+  assert.equal(topology.locations.get("instance:patroon").latitude, 40);
+  assert.equal(topology.locations.get("instance:patroon").longitude, -75);
   assert.equal(topology.locations.get("interface:i2p").actual, false);
   assert.equal(topology.locations.get("interface:i2p").anchorId, "instance:patroon");
   assert.equal(topology.locations.get("ghost:route").distance, 3);
@@ -43,6 +45,22 @@ test("geographic topology anchors RMAP nodes and schematically places connected 
   assert.equal(topology.syntheticCount, 4);
   assert.equal(topology.omittedCount, 0);
   assert.equal(topology.edges.length, 4);
+  const ordered = [
+    "instance:patroon", "interface:i2p", "transport:next", "ghost:route", "destination:lxmf",
+  ].map((id) => topology.locations.get(id));
+  for (let index = 2; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1];
+    const beforePrevious = ordered[index - 2];
+    const incoming = {
+      x: previous.longitude - beforePrevious.longitude,
+      y: previous.latitude - beforePrevious.latitude,
+    };
+    const outgoing = {
+      x: ordered[index].longitude - previous.longitude,
+      y: ordered[index].latitude - previous.latitude,
+    };
+    assert.ok(incoming.x * outgoing.x + incoming.y * outgoing.y > 0);
+  }
 });
 
 test("unconnected nodes without coordinates are omitted instead of geolocated by guess", () => {

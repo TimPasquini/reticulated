@@ -137,7 +137,7 @@ export function buildGeographicTopology(snapshot, renderModel) {
   const ownership = new Map();
   const queue = [];
   for (const id of locations.keys()) {
-    ownership.set(id, { anchorId: id, distance: 0 });
+    ownership.set(id, { anchorId: id, distance: 0, parentId: null });
     queue.push(id);
   }
   for (let index = 0; index < queue.length; index += 1) {
@@ -145,37 +145,59 @@ export function buildGeographicTopology(snapshot, renderModel) {
     const owner = ownership.get(current);
     for (const neighbor of adjacency.get(current) || []) {
       if (ownership.has(neighbor)) continue;
-      ownership.set(neighbor, { anchorId: owner.anchorId, distance: owner.distance + 1 });
+      ownership.set(neighbor, {
+        anchorId: owner.anchorId, distance: owner.distance + 1, parentId: current,
+      });
       queue.push(neighbor);
     }
   }
 
-  const clusters = new Map();
+  const childrenByParent = new Map();
   for (const [id, owner] of ownership) {
     if (locations.has(id)) continue;
-    const node = nodes.get(id);
-    const key = owner.anchorId + "|" + semanticGroup(node);
-    if (!clusters.has(key)) clusters.set(key, []);
-    clusters.get(key).push({ id, owner, node });
+    if (!childrenByParent.has(owner.parentId)) childrenByParent.set(owner.parentId, []);
+    childrenByParent.get(owner.parentId).push({ id, owner, node: nodes.get(id) });
   }
-  for (const [key, members] of clusters) {
-    members.sort((left, right) => left.owner.distance - right.owner.distance || left.id.localeCompare(right.id));
-    const anchor = locations.get(members[0].owner.anchorId);
-    if (!anchor) continue;
-    const centerAngle = (hashNumber(key) % 6283) / 1000;
-    members.forEach((member, index) => {
-      const ring = Math.floor(index / 10);
-      const slot = index % 10;
-      const slotCount = Math.min(10, members.length - ring * 10);
-      const angle = centerAngle + (slot - (slotCount - 1) / 2) * 0.11;
-      const radius = 0.32 + member.owner.distance * 0.24 + ring * 0.22;
-      const latitude = Math.max(-89.5, Math.min(89.5, anchor.latitude + Math.sin(angle) * radius));
-      const lonScale = Math.max(0.2, Math.cos(anchor.latitude * Math.PI / 180));
-      let longitude = anchor.longitude + Math.cos(angle) * radius / lonScale;
-      longitude = ((longitude + 540) % 360) - 180;
-      locations.set(member.id, {
-        latitude, longitude, actual: false,
-        anchorId: member.owner.anchorId, distance: member.owner.distance,
+  const parentIds = Array.from(childrenByParent.keys()).sort((left, right) =>
+    (ownership.get(left)?.distance || 0) - (ownership.get(right)?.distance || 0) ||
+    String(left).localeCompare(String(right))
+  );
+  for (const parentId of parentIds) {
+    const parent = locations.get(parentId);
+    if (!parent) continue;
+    const groups = new Map();
+    for (const member of childrenByParent.get(parentId) || []) {
+      const key = semanticGroup(member.node);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(member);
+    }
+    const grouped = Array.from(groups.entries()).sort(([left], [right]) => left.localeCompare(right));
+    const rotation = parent.actual
+      ? (hashNumber(parentId) % 6283) / 1000
+      : Number(parent.angle || 0);
+    grouped.forEach(([, members], groupIndex) => {
+      members.sort((left, right) => left.id.localeCompare(right.id));
+      // Geographic anchors distribute major interface/service families around
+      // the full hub. Descendants inherit their parent's bearing and only fork
+      // through a narrow forward arc, producing readable outward spokes.
+      const groupAngle = parent.actual
+        ? rotation + groupIndex * (Math.PI * 2 / Math.max(1, grouped.length))
+        : rotation + (groupIndex - (grouped.length - 1) / 2) * 0.65;
+      members.forEach((member, index) => {
+        const ring = Math.floor(index / 9);
+        const slot = index % 9;
+        const slotCount = Math.min(9, members.length - ring * 9);
+        const angle = groupAngle + (slot - (slotCount - 1) / 2) * 0.14;
+        const radius = 0.34 + ring * 0.24;
+        const latitude = Math.max(-89.5, Math.min(89.5, parent.latitude + Math.sin(angle) * radius));
+        const lonScale = Math.max(0.2, Math.cos(parent.latitude * Math.PI / 180));
+        let longitude = parent.longitude + Math.cos(angle) * radius / lonScale;
+        longitude = ((longitude + 540) % 360) - 180;
+        locations.set(member.id, {
+          latitude, longitude, actual: false, angle,
+          anchorId: member.owner.anchorId, distance: member.owner.distance,
+          parentId,
+        });
       });
     });
   }
