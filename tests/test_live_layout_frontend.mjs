@@ -5,6 +5,7 @@ import {
   anchorNewPositions,
   captureLayoutState,
   clearPinnedLayout,
+  elkLayerBound,
   hybridBusPositions,
   mergeLivePositions,
   orthogonalSegmentGeometry,
@@ -13,6 +14,13 @@ import {
   rememberedPinnedRmapNodes,
   rememberLivePosition,
 } from "../web/live-layout.mjs";
+
+test("ELK layer bounds spread large hub layers across both axes", () => {
+  assert.equal(elkLayerBound(4), 8);
+  assert.equal(elkLayerBound(100), 10);
+  assert.equal(elkLayerBound(500), 22);
+  assert.equal(elkLayerBound(10000), 28);
+});
 
 test("ELK bend points convert to Cytoscape segment geometry", () => {
   const geometry = orthogonalSegmentGeometry({

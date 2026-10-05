@@ -61,7 +61,7 @@ export function anchorNewPositions(generated, merged, saved, current, edges) {
 }
 
 export function radialClusterPosition(
-  anchor, index, baseRadius = 140, spacing = 85, startAngle = Math.PI / 2
+  anchor, index, baseRadius = 210, spacing = 110, startAngle = Math.PI / 2
 ) {
   // Golden-angle spiral: deterministic, roughly round, and its width grows
   // with sqrt(count) instead of linearly with the number of siblings.
@@ -91,6 +91,13 @@ export function orthogonalSegmentGeometry(section) {
       ((point.y - start.y) * dx - (point.x - start.x) * dy) / length
     ),
   };
+}
+
+export function elkLayerBound(nodeCount) {
+  // A square-root bound makes a wide star spill into roughly balanced rows
+  // and columns instead of placing every spoke in one enormous vertical
+  // layer. Keep tiny graphs layered and cap huge graphs at a readable row.
+  return Math.max(8, Math.min(28, Math.round(Math.sqrt(Math.max(1, nodeCount)))));
 }
 
 const TRANSIT_KINDS = new Set([
@@ -207,7 +214,7 @@ export function hybridBusPositions(nodes, edges, initialPositions, pinnedIds) {
       // Parallel lanes keep multiple logical transfers legible without
       // pretending that their intermediate routers are known.
       const lane = index - (entries.length - 1) / 2;
-      const offset = lane * 62;
+      const offset = lane * 110;
       positions[entry.id] = {
         x: a.x + dx * t - (dy / length) * offset,
         y: a.y + dy * t + (dx / length) * offset,
@@ -239,7 +246,7 @@ export function hybridBusPositions(nodes, edges, initialPositions, pinnedIds) {
     const anchor = positions[parent] || averagePoint(ids.map((id) => positions[id]).filter(Boolean));
     ids.sort();
     ids.forEach((id, index) => {
-      positions[id] = radialClusterPosition(anchor, index, 145, 76, Math.PI / 2);
+      positions[id] = radialClusterPosition(anchor, index, 210, 110, Math.PI / 2);
     });
   }
 

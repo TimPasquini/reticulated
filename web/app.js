@@ -2,6 +2,7 @@ import {
   anchorNewPositions,
   captureLayoutState,
   clearPinnedLayout,
+  elkLayerBound,
   hybridBusPositions,
   mergeLivePositions,
   orthogonalSegmentGeometry,
@@ -78,6 +79,7 @@ const state = {
   liveLayoutSaveGeneration: 0,
   liveBlankSlateScope: null,
   livePendingSaves: new Set(),
+  liveTopologySettleTimer: null,
   liveLayouts: [],
   topology: { nodes: {}, links: {} },
   addresses: {},
@@ -658,7 +660,7 @@ function livePositions(snapshot, renderModel) {
     if (root.id === primary.id) return;
     secondaryIndex += 1;
     const direction = secondaryIndex % 2 ? -1 : 1;
-    positions[root.id] = { x: direction * Math.ceil(secondaryIndex / 2) * 520, y: -300 };
+    positions[root.id] = { x: direction * Math.ceil(secondaryIndex / 2) * 780, y: -440 };
   });
 
   const interfacesByRoot = new Map();
@@ -670,7 +672,7 @@ function livePositions(snapshot, renderModel) {
     const children = (interfacesByRoot.get(root.id) || []).sort();
     const anchor = positions[root.id];
     children.forEach((id, index) => {
-      positions[id] = radialClusterPosition(anchor, index, 180, 105);
+      positions[id] = radialClusterPosition(anchor, index, 260, 145);
     });
   }
   const peerEdges = renderModel.edges.filter((edge) => edge.kind === "observed_peer_interface");
@@ -685,12 +687,12 @@ function livePositions(snapshot, renderModel) {
     const anchor = positions[parentId];
     if (!anchor) continue;
     childIds.sort().forEach((id, index) => {
-      positions[id] = radialClusterPosition(anchor, index, 145, 90, Math.PI / 3);
+      positions[id] = radialClusterPosition(anchor, index, 220, 125, Math.PI / 3);
     });
   }
   const unpositionedInterfaces = (snapshot.interfaces || []).filter((item) => !positions[item.id]);
   unpositionedInterfaces.forEach((item, index) => {
-    positions[item.id] = radialClusterPosition({ x: 0, y: 0 }, index, 240, 110);
+    positions[item.id] = radialClusterPosition({ x: 0, y: 0 }, index, 340, 150);
   });
 
   // Spread next hops around the interfaces that observed them. Several next
@@ -711,7 +713,7 @@ function livePositions(snapshot, renderModel) {
     group.items.sort((left, right) => left.id.localeCompare(right.id));
     group.items.forEach((item, index) => {
       positions[item.id] = radialClusterPosition(
-        { x: group.anchorX, y: group.anchorY }, index, 175, 90
+        { x: group.anchorX, y: group.anchorY }, index, 250, 125
       );
     });
   }
@@ -739,7 +741,7 @@ function livePositions(snapshot, renderModel) {
       tierEdges.sort((left, right) => left.target.localeCompare(right.target));
       tierEdges.forEach((edge, index) => {
         positions[edge.target] = radialClusterPosition(
-          anchor, index, 150 + (tier - 1) * 105, 78, Math.PI / 2 + tier * 0.37
+          anchor, index, 230 + (tier - 1) * 150, 110, Math.PI / 2 + tier * 0.37
         );
       });
     }
@@ -1139,6 +1141,7 @@ function rebuildLive(snapshot) {
   const oldZoom = cy.zoom();
   const oldPositions = {};
   cy.nodes().forEach((node) => { oldPositions[node.id()] = { ...node.position() }; });
+  const oldElementIds = new Set(cy.elements().map((element) => element.id()));
   const selectedIds = cy.$(":selected").map((element) => element.id());
   const renderModel = liveRenderModel(snapshot);
   const graphSignature = liveGraphSignature(snapshot, renderModel);
@@ -1302,6 +1305,9 @@ function rebuildLive(snapshot) {
       classes: (incomplete ? "live-incomplete" : (historical ? "live-historical" : "live-observed")) + (edge.kind === "known_path" ? liveHopClass(edge.hops, edge.hop_tier) : ""),
     });
   }
+  const nextElementIds = new Set(els.map((element) => element.data.id));
+  const topologyChanged = els.some((element) => !oldElementIds.has(element.data.id)) ||
+    Array.from(oldElementIds).some((id) => !nextElementIds.has(id));
   cy.add(els);
   state.liveGraphSignature = graphSignature;
   if (state.liveSavedLayout && state.liveSavedLayout.positions) {
@@ -1316,9 +1322,9 @@ function rebuildLive(snapshot) {
   }
   applyLivePins();
   const hasSavedPositions = Object.keys(savedPositions).length > 0;
-  // Newly received announces must not launch the force solver every poll.
-  // Their deterministic seed positions are immediately usable; users can run
-  // Layout explicitly when they want a global refinement.
+  // Ordinary polls preserve the current view. A structural change is handled
+  // separately below: new elements first appear at deterministic seeds, then
+  // a debounced solver animation lets the surrounding graph settle.
   const blankSlate = state.liveBlankSlateScope === liveLayoutScope();
   const shouldAutoLayout = !blankSlate &&
     (state.liveLayoutPending || (!hadLiveGraph && !hasSavedPositions));
@@ -1338,10 +1344,10 @@ function rebuildLive(snapshot) {
   }
   if (shouldAutoLayout) {
     state.liveLayoutPending = false;
-    // Run the same detangle/refine pipeline after a reporter, RMAP or path
-    // enrichment changes the graph structure. Ordinary polling does not set
-    // this flag, so user positions and viewport remain stable between polls.
-    requestAnimationFrame(() => runLiveLayout(false));
+    // Initial entry and explicit pending requests use the selected solver.
+    requestAnimationFrame(() => runSelectedLiveLayout(false, true, true));
+  } else if (hadLiveGraph && topologyChanged && !blankSlate) {
+    scheduleLiveTopologySettle();
   }
 }
 
@@ -2142,6 +2148,10 @@ document.getElementById("btn-stop").onclick = () => api.post("/api/stop");
 document.getElementById("mode-simulation").onclick = () => setOperatingMode("simulation");
 document.getElementById("mode-live").onclick = () => setOperatingMode("live");
 document.getElementById("live-reporter").onchange = (event) => {
+  if (state.liveTopologySettleTimer) {
+    clearTimeout(state.liveTopologySettleTimer);
+    state.liveTopologySettleTimer = null;
+  }
   saveLiveMapViewport();
   state.liveReporterId = event.target.value;
   state.live = null;
@@ -2197,6 +2207,10 @@ async function resetLiveWorkspace() {
   const scope = liveLayoutScope();
   state.liveBlankSlateScope = scope;
   state.liveLayoutSaveGeneration += 1;
+  if (state.liveTopologySettleTimer) {
+    clearTimeout(state.liveTopologySettleTimer);
+    state.liveTopologySettleTimer = null;
+  }
   if (state.liveLayoutSaveTimer) {
     clearTimeout(state.liveLayoutSaveTimer);
     state.liveLayoutSaveTimer = null;
@@ -2493,7 +2507,7 @@ function setupHold(btn, ms, action) {
 
 setupHold(document.getElementById("btn-reset"), 3000, () => api.post("/api/reset"));
 
-async function runElkLayeredLayout() {
+async function runElkLayeredLayout({ animate = true, fitViewport = true, clearPins = true } = {}) {
   if (!state.live || !cy.nodes().length || state.liveLayoutRunning) return;
   if (!elkLayoutEngine) {
     window.alert("ELK Layered is unavailable in this build.");
@@ -2507,7 +2521,7 @@ async function runElkLayeredLayout() {
   try {
     // ELK Layered owns the whole canvas. Pins are deliberately and
     // authoritatively removed before its crossing-minimisation pass.
-    await clearAllLivePins();
+    if (clearPins) await clearAllLivePins();
     if (scope !== liveLayoutScope()) return;
     const liveNodes = cy.nodes("[liveKind]");
     const liveEdges = cy.edges("[liveKind]");
@@ -2517,12 +2531,15 @@ async function runElkLayeredLayout() {
         "elk.algorithm": "layered",
         "elk.direction": "RIGHT",
         "elk.edgeRouting": "ORTHOGONAL",
-        "elk.spacing.nodeNode": "75",
-        "elk.spacing.edgeNode": "35",
-        "elk.spacing.edgeEdge": "25",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "150",
-        "elk.layered.spacing.edgeNodeBetweenLayers": "55",
-        "elk.layered.layering.strategy": "NETWORK_SIMPLEX",
+        "elk.spacing.nodeNode": "120",
+        "elk.spacing.edgeNode": "70",
+        "elk.spacing.edgeEdge": "40",
+        "elk.spacing.componentComponent": "280",
+        "elk.layered.spacing.nodeNodeBetweenLayers": "260",
+        "elk.layered.spacing.edgeNodeBetweenLayers": "90",
+        "elk.layered.spacing.edgeEdgeBetweenLayers": "35",
+        "elk.layered.layering.strategy": "COFFMAN_GRAHAM",
+        "elk.layered.layering.coffmanGraham.layerBound": String(elkLayerBound(liveNodes.length)),
         "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
         "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
         "elk.layered.nodePlacement.bk.edgeStraightening": "IMPROVE_STRAIGHTNESS",
@@ -2545,15 +2562,33 @@ async function runElkLayeredLayout() {
     if (scope !== liveLayoutScope() || state.uiMode !== "live") return;
     const resultNodes = new Map((result.children || []).map((node) => [node.id, node]));
     const resultEdges = new Map((result.edges || []).map((edge) => [edge.id, edge]));
-    cy.batch(() => {
-      liveNodes.forEach((node) => {
-        const placed = resultNodes.get(node.id());
-        if (!placed) return;
-        node.position({
-          x: placed.x + placed.width / 2,
-          y: placed.y + placed.height / 2,
+    const targetPositions = {};
+    liveNodes.forEach((node) => {
+      const placed = resultNodes.get(node.id());
+      if (!placed) return;
+      targetPositions[node.id()] = {
+        x: placed.x + placed.width / 2,
+        y: placed.y + placed.height / 2,
+      };
+    });
+    if (!fitViewport) {
+      const aligned = liveNodes.filter((node) => targetPositions[node.id()]);
+      if (aligned.length) {
+        const currentCenter = aligned.reduce((center, node) => ({
+          x: center.x + node.position("x") / aligned.length,
+          y: center.y + node.position("y") / aligned.length,
+        }), { x: 0, y: 0 });
+        const targetCenter = aligned.reduce((center, node) => ({
+          x: center.x + targetPositions[node.id()].x / aligned.length,
+          y: center.y + targetPositions[node.id()].y / aligned.length,
+        }), { x: 0, y: 0 });
+        Object.values(targetPositions).forEach((position) => {
+          position.x += currentCenter.x - targetCenter.x;
+          position.y += currentCenter.y - targetCenter.y;
         });
-      });
+      }
+    }
+    cy.batch(() => {
       liveEdges.forEach((edge) => {
         const routed = resultEdges.get(edge.id());
         const segments = orthogonalSegmentGeometry(
@@ -2570,7 +2605,18 @@ async function runElkLayeredLayout() {
         }
       });
     });
-    cy.fit(cy.elements(), 70);
+    await new Promise((resolve) => {
+      const layout = cy.layout({
+        name: "preset",
+        positions: (node) => targetPositions[node.id()] || node.position(),
+        animate: animate,
+        animationDuration: animate ? 900 : 0,
+        fit: fitViewport,
+        padding: 70,
+      });
+      layout.one("layoutstop", resolve);
+      layout.run();
+    });
     scheduleLiveAutosave();
     console.info(
       "Reticulated layout profile: ELK layered + orthogonal,",
@@ -2586,7 +2632,7 @@ async function runElkLayeredLayout() {
   }
 }
 
-function runLiveLayout(animate) {
+function runLiveLayout(animate, fitViewport = true, incremental = false) {
   if (!state.live || !cy.nodes().length || state.liveLayoutRunning) return;
   state.liveLayoutRunning = true;
   state.liveLayoutSaveGeneration += 1;
@@ -2599,14 +2645,20 @@ function runLiveLayout(animate) {
   const renderModel = liveRenderModel(state.live);
   const generated = livePositions(state.live, renderModel);
   const pinnedPositions = {};
+  const currentPositions = {};
   cy.nodes("[liveKind]").forEach((node) => {
+    currentPositions[node.id()] = { ...node.position() };
     if (state.livePinned.has(node.id())) pinnedPositions[node.id()] = { ...node.position() };
   });
   let seeded = mergeLivePositions(
-    generated, pinnedPositions, pinnedPositions, state.livePinned
+    generated, pinnedPositions,
+    incremental ? currentPositions : pinnedPositions,
+    state.livePinned
   );
   seeded = anchorNewPositions(
-    generated, seeded, pinnedPositions, pinnedPositions, renderModel.edges
+    generated, seeded, pinnedPositions,
+    incremental ? currentPositions : pinnedPositions,
+    renderModel.edges
   );
   const liveNodes = cy.nodes("[liveKind]");
   const graphNodes = liveNodes.map((node) => ({
@@ -2626,11 +2678,6 @@ function runLiveLayout(animate) {
     busEdgeIds = hybrid.busEdgeIds;
   }
   cy.batch(() => {
-    liveNodes.forEach((node) => {
-      if (!state.livePinned.has(node.id()) && layoutPositions[node.id()]) {
-        node.position(layoutPositions[node.id()]);
-      }
-    });
     cy.edges("[liveKind]").forEach((edge) => {
       edge.toggleClass("live-layout-bus", busEdgeIds.has(edge.id()));
       edge.removeClass("elk-orthogonal");
@@ -2662,19 +2709,39 @@ function runLiveLayout(animate) {
   // the global spring solver entirely, which keeps curated anchors fixed and
   // remains responsive on large announce/path graphs.
   if (state.liveLayoutMode === "hybrid_bus" || state.liveLayoutMode === "radial") {
-    cy.fit(cy.elements(), 70);
-    finish(state.liveLayoutMode === "hybrid_bus"
-      ? "hybrid transfer buses + radial spokes"
-      : "radial topology clusters");
+    const layout = cy.layout({
+      name: "preset",
+      positions: (node) => state.livePinned.has(node.id())
+        ? node.position() : (layoutPositions[node.id()] || node.position()),
+      animate: animate,
+      animationDuration: animate ? 900 : 0,
+      fit: fitViewport,
+      padding: 70,
+    });
+    layout.one("layoutstop", () => {
+      finish(state.liveLayoutMode === "hybrid_bus"
+        ? "hybrid transfer buses + radial spokes"
+        : "radial topology clusters");
+    });
+    layout.run();
     return;
   }
+
+  // fCoSE refines the topology seed incrementally. Apply the seed first; the
+  // solver animation then shows the new tension propagating through the
+  // unpinned graph rather than spawning nodes in an arbitrary row.
+  liveNodes.forEach((node) => {
+    if (!state.livePinned.has(node.id()) && layoutPositions[node.id()]) {
+      node.position(layoutPositions[node.id()]);
+    }
+  });
 
   // Force-directed layouts become disproportionately expensive once announce
   // enrichment grows into the hundreds. The radial topology seed above still
   // performs a useful layout instead of leaving large graphs in fixed rows.
   if (nodeCount > 400) {
     cy.nodes("[liveKind]").unlock();
-    cy.fit(cy.elements(), 70);
+    if (fitViewport) cy.fit(cy.elements(), 70);
     finish("radial topology clusters (force mode skipped above 400 nodes)");
     return;
   }
@@ -2688,14 +2755,14 @@ function runLiveLayout(animate) {
     randomize: false,
     animate: animate,
     animationDuration: animate ? 700 : 0,
-    fit: true,
+    fit: fitViewport,
     padding: 70,
     nodeDimensionsIncludeLabels: true,
     samplingType: true,
     sampleSize: 25,
-    nodeSeparation: 120,
-    nodeRepulsion: 7000,
-    idealEdgeLength: 135,
+    nodeSeparation: 190,
+    nodeRepulsion: 11000,
+    idealEdgeLength: 225,
     edgeElasticity: 0.35,
     nestingFactor: 0.1,
     gravity: 0.08,
@@ -2713,22 +2780,50 @@ function runLiveLayout(animate) {
   layout.run();
 }
 
+function runSelectedLiveLayout(animate, fitViewport, automatic = false) {
+  if (state.liveLayoutMode === "elk_layered") {
+    // Background updates never discard a pin. A deliberate ELK Layout action
+    // is the only operation allowed to perform its advertised clear-all.
+    if (automatic && state.livePinned.size) return;
+    runElkLayeredLayout({
+      animate: animate,
+      fitViewport: fitViewport,
+      clearPins: !automatic,
+    });
+    return;
+  }
+  runLiveLayout(animate, fitViewport, automatic);
+}
+
+function scheduleLiveTopologySettle() {
+  if (state.liveTopologySettleTimer) clearTimeout(state.liveTopologySettleTimer);
+  state.liveTopologySettleTimer = setTimeout(() => {
+    state.liveTopologySettleTimer = null;
+    if (state.uiMode !== "live") return;
+    if (state.liveLayoutRunning || state.liveDragging.size) {
+      scheduleLiveTopologySettle();
+      return;
+    }
+    runSelectedLiveLayout(true, false, true);
+  }, 650);
+}
+
 function runLayout() {
   if (!cy.nodes().length) return;
   if (state.uiMode === "live") {
-    state.liveBlankSlateScope = null;
-    if (state.liveLayoutMode === "elk_layered") {
-      runElkLayeredLayout();
-      return;
+    if (state.liveTopologySettleTimer) {
+      clearTimeout(state.liveTopologySettleTimer);
+      state.liveTopologySettleTimer = null;
     }
+    state.liveBlankSlateScope = null;
     state.liveLayoutPending = true;
-    runLiveLayout(true);
+    runSelectedLiveLayout(true, true, false);
     return;
   }
   const layout = cy.layout({
-    name: "cose", animate: true, animationDuration: 600, randomize: true,
-    nodeOverlap: 24, idealEdgeLength: 110, componentSpacing: 130,
-    nodeRepulsion: 400000, gravity: 0.25, numIter: 1200, padding: 50, fit: true,
+    name: "cose", animate: true, animationDuration: 900, randomize: true,
+    nodeOverlap: 50, idealEdgeLength: 220, componentSpacing: 260,
+    nodeRepulsion: 650000, gravity: 0.2, numIter: 1600, padding: 70, fit: true,
   });
   layout.one("layoutstop", saveLayout);
   layout.run();
