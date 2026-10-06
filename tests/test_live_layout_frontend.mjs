@@ -19,6 +19,7 @@ import {
   rememberedPinnedRmapNodes,
   rememberLivePosition,
   shouldAutoSolveLiveLayout,
+  shouldRunLiveForceLayout,
 } from "../web/live-layout.mjs";
 
 test("an inferred route recycles its pin after disappearing and reappearing", () => {
@@ -66,6 +67,12 @@ test("saved absolute coordinates suppress noisy automatic re-solves", () => {
   assert.equal(shouldAutoSolveLiveLayout({ pending: true, hasSavedPositions: false }), true);
   assert.equal(shouldAutoSolveLiveLayout({ hadGraph: false, hasSavedPositions: false }), true);
   assert.equal(shouldAutoSolveLiveLayout({ pending: true, blankSlate: true }), false);
+});
+
+test("main-thread force refinement is bounded to small live graphs", () => {
+  assert.equal(shouldRunLiveForceLayout(120, 360), true);
+  assert.equal(shouldRunLiveForceLayout(121, 100), false);
+  assert.equal(shouldRunLiveForceLayout(80, 361), false);
 });
 
 test("live nodes receive useful semantic cluster keys", () => {

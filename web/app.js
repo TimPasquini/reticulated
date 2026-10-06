@@ -14,7 +14,8 @@ import {
   rememberedPinnedRmapNodes,
   rememberLivePosition,
   shouldAutoSolveLiveLayout,
-} from "./live-layout.mjs?v=7";
+  shouldRunLiveForceLayout,
+} from "./live-layout.mjs?v=8";
 import {
   buildGeographicTopology,
   geographicVisibility,
@@ -2640,7 +2641,13 @@ async function runElkLayeredLayout({ animate = true, fitViewport = true, clearPi
         id: edge.id(), sources: [edge.source().id()], targets: [edge.target().id()],
       })),
     };
-    const result = await elkLayoutEngine.layout(graph);
+    let elkTimer = null;
+    const result = await Promise.race([
+      elkLayoutEngine.layout(graph),
+      new Promise((_, reject) => {
+        elkTimer = setTimeout(() => reject(new Error("ELK solve timed out after 12 seconds")), 12000);
+      }),
+    ]).finally(() => clearTimeout(elkTimer));
     if (scope !== liveLayoutScope() || state.uiMode !== "live") return;
     const resultNodes = new Map((result.children || []).map((node) => [node.id, node]));
     const resultEdges = new Map((result.edges || []).map((edge) => [edge.id, edge]));
@@ -2687,7 +2694,7 @@ async function runElkLayeredLayout({ animate = true, fitViewport = true, clearPi
         }
       });
     });
-    await new Promise((resolve) => {
+    await new Promise((resolve, reject) => {
       const layout = cy.layout({
         name: "preset",
         positions: (node) => targetPositions[node.id()] || node.position(),
@@ -2696,7 +2703,19 @@ async function runElkLayeredLayout({ animate = true, fitViewport = true, clearPi
         fit: fitViewport,
         padding: 70,
       });
-      layout.one("layoutstop", resolve);
+      let settled = false;
+      const stopTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { layout.stop(); } catch (_) { /* best-effort recovery */ }
+        reject(new Error("ELK placement timed out"));
+      }, 4000);
+      layout.one("layoutstop", () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(stopTimer);
+        resolve();
+      });
       layout.run();
     });
     scheduleLiveAutosave();
@@ -2721,6 +2740,28 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
   const startedAt = performance.now();
   const nodeCount = cy.nodes().length;
   const edgeCount = cy.edges().length;
+  let activeLayout = null;
+  let finished = false;
+  const finish = (strategy) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(layoutWatchdog);
+    state.liveLayoutRunning = false;
+    state.liveLayoutPending = false;
+    cy.nodes("[liveKind]").unlock();
+    applyLivePins();
+    scheduleLiveAutosave();
+    console.info(
+      "Reticulated layout profile:", strategy,
+      nodeCount + " nodes,", edgeCount + " edges,",
+      Math.round(performance.now() - startedAt) + "ms"
+    );
+  };
+  const layoutWatchdog = setTimeout(() => {
+    try { if (activeLayout) activeLayout.stop(); } catch (_) { /* best-effort recovery */ }
+    console.warn("Reticulated layout watchdog recovered an unfinished layout");
+    finish("timed out and recovered");
+  }, 8000);
   // Rebuild every unpinned branch from topology-aware seeds on an explicit
   // Layout request. Only pinned coordinates act as anchors; a bad historical
   // row must not remain authoritative merely because it is currently drawn.
@@ -2789,18 +2830,6 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
     cy.getElementById(constraint.nodeId).lock();
   });
 
-  const finish = (strategy) => {
-    state.liveLayoutRunning = false;
-    state.liveLayoutPending = false;
-    applyLivePins();
-    scheduleLiveAutosave();
-    console.info(
-      "Reticulated layout profile:", strategy,
-      nodeCount + " nodes,", edgeCount + " edges,",
-      Math.round(performance.now() - startedAt) + "ms"
-    );
-  };
-
   // The topology-aware modes are deterministic placement passes. They avoid
   // the global spring solver entirely, which keeps curated anchors fixed and
   // remains responsive on large announce/path graphs.
@@ -2814,6 +2843,7 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
       fit: fitViewport,
       padding: 70,
     });
+    activeLayout = layout;
     layout.one("layoutstop", () => {
       finish(state.liveLayoutMode === "hybrid_bus"
         ? "hybrid transfer buses + semantic fork clusters"
@@ -2835,45 +2865,56 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
   // Force-directed layouts become disproportionately expensive once announce
   // enrichment grows into the hundreds. The radial topology seed above still
   // performs a useful layout instead of leaving large graphs in fixed rows.
-  if (nodeCount > 400) {
+  if (!shouldRunLiveForceLayout(nodeCount, edgeCount)) {
     cy.nodes("[liveKind]").unlock();
     if (fitViewport) cy.fit(cy.elements(), 70);
-    finish("radial topology clusters (force mode skipped above 400 nodes)");
+    finish("topology clusters (main-thread force solve skipped for graph size)");
     return;
   }
 
   // Preserve topology-aware and user-arranged starting positions. The old
   // random spectral pass discarded those anchors and collapsed branches back
   // around the generated origin before the force refinement even began.
-  const layout = cy.layout({
-    name: "fcose",
-    quality: "default",
-    randomize: false,
-    animate: animate,
-    animationDuration: animate ? 700 : 0,
-    fit: fitViewport,
-    padding: 70,
-    nodeDimensionsIncludeLabels: true,
-    samplingType: true,
-    sampleSize: 25,
-    nodeSeparation: 340,
-    nodeRepulsion: 26000,
-    idealEdgeLength: 460,
-    edgeElasticity: 0.35,
-    nestingFactor: 0.1,
-    gravity: 0.08,
-    gravityRange: 4.5,
-    gravityCompound: 0.08,
-    gravityRangeCompound: 2.0,
-    numIter: 2500,
-    initialEnergyOnIncremental: 0.2,
-    packComponents: true,
-    fixedNodeConstraint: fixedNodeConstraint,
+  // Yield once before invoking fCoSE so the click/repaint completes. The
+  // conservative budget above bounds the remaining synchronous solver work.
+  requestAnimationFrame(() => {
+    if (finished) return;
+    try {
+      const layout = cy.layout({
+        name: "fcose",
+        quality: "default",
+        randomize: false,
+        animate: animate,
+        animationDuration: animate ? 700 : 0,
+        fit: fitViewport,
+        padding: 70,
+        nodeDimensionsIncludeLabels: true,
+        samplingType: true,
+        sampleSize: 25,
+        nodeSeparation: 340,
+        nodeRepulsion: 26000,
+        idealEdgeLength: 460,
+        edgeElasticity: 0.35,
+        nestingFactor: 0.1,
+        gravity: 0.08,
+        gravityRange: 4.5,
+        gravityCompound: 0.08,
+        gravityRangeCompound: 2.0,
+        numIter: 800,
+        initialEnergyOnIncremental: 0.2,
+        packComponents: true,
+        fixedNodeConstraint: fixedNodeConstraint,
+      });
+      activeLayout = layout;
+      layout.one("layoutstop", () => {
+        finish("incremental constrained fCoSE");
+      });
+      layout.run();
+    } catch (error) {
+      console.error("Live force layout failed", error);
+      finish("force layout failed and recovered");
+    }
   });
-  layout.one("layoutstop", () => {
-    finish("incremental constrained fCoSE");
-  });
-  layout.run();
 }
 
 function runSelectedLiveLayout(animate, fitViewport, automatic = false) {

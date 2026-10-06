@@ -19,6 +19,15 @@ export function shouldAutoSolveLiveLayout({
   return !blankSlate && !hasSavedPositions && (pending || !hadGraph);
 }
 
+export function shouldRunLiveForceLayout(nodeCount, edgeCount) {
+  // fCoSE performs most of its solve on the browser's main thread. Past this
+  // deliberately conservative budget it can block Cytoscape interaction for
+  // seconds (or indefinitely on low-power clients). Large live graphs already
+  // have a topology-aware deterministic placement, so refining them is not
+  // worth making pan/zoom and the Layout controls unresponsive.
+  return Number(nodeCount) <= 120 && Number(edgeCount) <= 360;
+}
+
 export function inferredRouteNodeId(edge, logicalTargetId) {
   // Backend edge IDs describe an individual observation and can change when
   // reports are merged or refreshed. An inferred body instead represents the
