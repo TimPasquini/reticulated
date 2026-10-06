@@ -70,6 +70,7 @@ const state = {
   liveMapLayers: null,
   liveMapHasInitialView: false,
   liveMapShowDeepPaths: false,
+  liveMapBranchesCollapsed: false,
   liveMapSignature: null,
   liveMapOpenNodeId: null,
   liveMapExpandedAnchors: new Set(),
@@ -1090,7 +1091,8 @@ function renderLiveMap(snapshot) {
   const renderModel = liveRenderModel(snapshot);
   const topology = buildGeographicTopology(snapshot, renderModel);
   const visibility = geographicVisibility(
-    topology, map.getZoom(), state.liveMapExpandedAnchors, state.liveMapShowDeepPaths
+    topology, map.getZoom(), state.liveMapExpandedAnchors,
+    state.liveMapShowDeepPaths, state.liveMapBranchesCollapsed
   );
   const mapSignature = JSON.stringify({
     nodes: topology.nodes.map((node) => [node.id, node.kind, mapNodeLabel(node)]),
@@ -1100,6 +1102,7 @@ function renderLiveMap(snapshot) {
     ]),
     detail: visibility.level,
     showDeepPaths: state.liveMapShowDeepPaths,
+    branchesCollapsed: state.liveMapBranchesCollapsed,
     expanded: Array.from(state.liveMapExpandedAnchors).sort(),
   });
   if (mapSignature === state.liveMapSignature) return;
@@ -2377,7 +2380,10 @@ document.getElementById("btn-live-map-deep").onclick = () => {
   if (state.live) renderLiveMap(state.live);
 };
 document.getElementById("btn-live-map-collapse").onclick = () => {
-  state.liveMapExpandedAnchors.clear();
+  state.liveMapBranchesCollapsed = !state.liveMapBranchesCollapsed;
+  if (state.liveMapBranchesCollapsed) state.liveMapExpandedAnchors.clear();
+  document.getElementById("btn-live-map-collapse").textContent =
+    state.liveMapBranchesCollapsed ? "Use zoom detail" : "Collapse branches";
   state.liveMapOpenNodeId = null;
   state.liveMapSignature = null;
   if (state.live) renderLiveMap(state.live);

@@ -133,4 +133,13 @@ test("map detail progressively reveals topology and supports anchor expansion", 
   const detail = geographicVisibility(topology, 9);
   assert.equal(detail.level, "detail");
   assert.equal(detail.visible.size, nodes.length);
+
+  const collapsed = geographicVisibility(topology, 9, new Set(), false, true);
+  assert.deepEqual(Array.from(collapsed.visible).sort(), ["anchor", "root"]);
+  assert.equal(collapsed.groups.length, 3);
+
+  const collapsedWithOneAnchorExpanded = geographicVisibility(
+    topology, 9, new Set(["anchor"]), false, true
+  );
+  assert.equal(collapsedWithOneAnchorExpanded.visible.size, nodes.length);
 });

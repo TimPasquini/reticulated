@@ -60,7 +60,8 @@ export function deepPathNodeIds(topology) {
 }
 
 export function geographicVisibility(
-  topology, zoom, expandedAnchors = new Set(), showDeepPaths = false
+  topology, zoom, expandedAnchors = new Set(), showDeepPaths = false,
+  collapseBranches = false
 ) {
   const expanded = expandedAnchors instanceof Set
     ? expandedAnchors : new Set(expandedAnchors || []);
@@ -74,8 +75,9 @@ export function geographicVisibility(
     const anchorExpanded = expanded.has(location.anchorId);
     const structural = ["root", "interface", "transport", "rmap_transport"].includes(node.kind);
     if (
-      location.actual || node.kind === "root" || anchorExpanded || level === "detail" ||
-      level === "regional" && (structural || location.distance <= 2)
+      location.actual || node.kind === "root" || anchorExpanded || !collapseBranches && (
+        level === "detail" || level === "regional" && (structural || location.distance <= 2)
+      )
     ) visible.add(id);
   }
 
