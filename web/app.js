@@ -990,7 +990,13 @@ function restoreLiveMapViewport() {
 
 function ensureLiveMap() {
   if (state.liveMap || typeof L === "undefined") return state.liveMap;
-  state.liveMap = L.map("live-map", { worldCopyJump: true, preferCanvas: true });
+  // Keep Leaflet's navigation out of the top overlay band used by the route
+  // key and map filters. Controls in the same Leaflet corner stack correctly
+  // with attribution instead of covering our independently positioned UI.
+  state.liveMap = L.map("live-map", {
+    worldCopyJump: true, preferCanvas: true, zoomControl: false,
+  });
+  L.control.zoom({ position: "bottomright" }).addTo(state.liveMap);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
