@@ -20,13 +20,16 @@ def main():
 
     url_host = "localhost" if args.host in ("0.0.0.0", "::", "") else args.host
     all_ifaces = "  (listening on all interfaces)" if args.host in ("0.0.0.0", "::") else ""
-    print("\n".join([
-        "reticulated",
+    banner = ["reticulated"]
+    if config.ENVIRONMENT_FILE:
+        banner.append("  config:     " + str(config.ENVIRONMENT_FILE))
+    banner.extend([
         "  web UI:     http://" + url_host + ":" + str(args.port) + all_ifaces,
         "  medium hub: " + args.hub_host + ":" + str(args.hub_port),
         "  data dir:   " + config.DATA_DIR,
         "  Ctrl+C to stop",
-    ]), flush=True)
+    ])
+    print("\n".join(banner), flush=True)
 
     try:
         uvicorn.run(

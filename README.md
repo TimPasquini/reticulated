@@ -35,6 +35,13 @@ python run.py --hub-port 5900             # move the medium hub off 5800
 SIM_PORT=9000 SIM_HUB_PORT=5900 python run.py
 ```
 
+Reticulated automatically loads settings from
+`~/.config/reticulated/reticulated.env` before startup. The file accepts
+`KEY=VALUE` and `export KEY=VALUE` lines; values already supplied by the shell
+or a service manager take priority. Set `RETICULATED_ENV_FILE` to use a
+different file. The file is parsed as data and is never executed as a shell
+script.
+
 ## Live RNS topology
 
 The UI has two independent modes. **Simulation** retains the original editable

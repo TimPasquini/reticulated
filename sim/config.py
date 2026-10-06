@@ -3,6 +3,14 @@ import shutil
 import hashlib
 import socket
 
+from .environment import load_environment_file
+
+
+# Load the program's own configuration before evaluating any constants. Values
+# explicitly supplied by a service manager or the invoking shell retain
+# priority over the user file.
+ENVIRONMENT_FILE = load_environment_file()
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("SIM_DATA_DIR", os.path.join(BASE_DIR, "simdata"))
 NODES_DIR = os.path.join(DATA_DIR, "nodes")
