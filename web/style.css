@@ -68,6 +68,8 @@ button:disabled { opacity: 0.45; cursor: default; }
 #live-map-summary .hop-2::before { border-color: #10b981 !important; border-top-style: dashed !important; }
 #live-map-summary .hop-3::before { border-color: #f59e0b !important; border-top-style: dashed !important; }
 #live-map-summary .hop-4::before { border-color: #a855f7 !important; border-top-style: dashed !important; }
+#live-map-controls { position: absolute; z-index: 500; right: 12px; top: 12px; }
+#live-map-controls button { background: rgba(27, 36, 48, 0.94); color: #d7dde5; border: 1px solid #526174; border-radius: 6px; padding: 6px 9px; cursor: pointer; }
 .leaflet-container { background: #111820; font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
 .live-map-popup { min-width: 190px; line-height: 1.35; }
 .live-map-popup strong { display: block; margin-bottom: 3px; }

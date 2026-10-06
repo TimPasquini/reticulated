@@ -30,6 +30,54 @@ function semanticGroup(node) {
   return node.kind || "other";
 }
 
+export function geographicDetailLevel(zoom) {
+  if (Number(zoom) >= 8) return "detail";
+  if (Number(zoom) >= 5) return "regional";
+  return "overview";
+}
+
+export function geographicVisibility(topology, zoom, expandedAnchors = new Set()) {
+  const expanded = expandedAnchors instanceof Set
+    ? expandedAnchors : new Set(expandedAnchors || []);
+  const level = geographicDetailLevel(zoom);
+  const visible = new Set();
+  const nodeById = new Map((topology.nodes || []).map((node) => [node.id, node]));
+  for (const [id, location] of topology.locations || []) {
+    const node = nodeById.get(id) || {};
+    const anchorExpanded = expanded.has(location.anchorId);
+    const structural = ["root", "interface", "transport", "rmap_transport"].includes(node.kind);
+    if (
+      location.actual || node.kind === "root" || anchorExpanded || level === "detail" ||
+      level === "regional" && (structural || location.distance <= 2)
+    ) visible.add(id);
+  }
+
+  const grouped = new Map();
+  for (const [id, location] of topology.locations || []) {
+    if (visible.has(id) || location.actual) continue;
+    const node = nodeById.get(id);
+    if (!node) continue;
+    const key = location.anchorId + "|" + semanticGroup(node);
+    if (!grouped.has(key)) grouped.set(key, {
+      id: "map-group:" + key,
+      anchorId: location.anchorId,
+      semanticGroup: semanticGroup(node),
+      members: [], latitude: 0, longitude: 0,
+    });
+    const group = grouped.get(key);
+    group.members.push(id);
+    group.latitude += location.latitude;
+    group.longitude += location.longitude;
+  }
+  const groups = Array.from(grouped.values()).map((group) => ({
+    ...group,
+    count: group.members.length,
+    latitude: group.latitude / group.members.length,
+    longitude: group.longitude / group.members.length,
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  return { level, visible, groups };
+}
+
 export function buildGeographicTopology(snapshot, renderModel) {
   const nodes = new Map();
   const edges = [];

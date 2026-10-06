@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildGeographicTopology } from "../web/live-map.mjs";
+import {
+  buildGeographicTopology,
+  geographicDetailLevel,
+  geographicVisibility,
+} from "../web/live-map.mjs";
 
 test("geographic topology anchors RMAP nodes and schematically places connected evidence", () => {
   const snapshot = {
@@ -71,4 +75,38 @@ test("unconnected nodes without coordinates are omitted instead of geolocated by
 
   assert.equal(topology.locations.size, 0);
   assert.equal(topology.omittedCount, 1);
+});
+
+test("map detail progressively reveals topology and supports anchor expansion", () => {
+  const nodes = [
+    { id: "anchor", kind: "rmap_transport", item: {} },
+    { id: "root", kind: "root", item: {} },
+    { id: "interface", kind: "interface", item: { type: "I2PInterface" } },
+    { id: "transport", kind: "transport", item: {} },
+    { id: "lxmf", kind: "announced_destination", item: { announce_aspect: "lxmf.delivery" } },
+  ];
+  const locations = new Map(nodes.map((node, index) => [node.id, {
+    latitude: 40 + index * 0.1, longitude: -75,
+    actual: index === 0, anchorId: "anchor", distance: index,
+  }]));
+  const topology = { nodes, locations };
+
+  const overview = geographicVisibility(topology, 3);
+  assert.equal(geographicDetailLevel(3), "overview");
+  assert.deepEqual(Array.from(overview.visible).sort(), ["anchor", "root"]);
+  assert.equal(overview.groups.length, 3);
+
+  const regional = geographicVisibility(topology, 6);
+  assert.equal(regional.level, "regional");
+  assert.ok(regional.visible.has("interface"));
+  assert.ok(regional.visible.has("transport"));
+  assert.equal(regional.visible.has("lxmf"), false);
+
+  const expanded = geographicVisibility(topology, 3, new Set(["anchor"]));
+  assert.equal(expanded.visible.size, nodes.length);
+  assert.equal(expanded.groups.length, 0);
+
+  const detail = geographicVisibility(topology, 9);
+  assert.equal(detail.level, "detail");
+  assert.equal(detail.visible.size, nodes.length);
 });

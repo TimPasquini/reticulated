@@ -15,7 +15,10 @@ import {
   rememberLivePosition,
   shouldAutoSolveLiveLayout,
 } from "./live-layout.mjs?v=7";
-import { buildGeographicTopology } from "./live-map.mjs?v=2";
+import {
+  buildGeographicTopology,
+  geographicVisibility,
+} from "./live-map.mjs?v=3";
 
 const api = {
   async get(path) { const r = await fetch(path); return r.json(); },
@@ -67,6 +70,7 @@ const state = {
   liveMapHasInitialView: false,
   liveMapSignature: null,
   liveMapOpenNodeId: null,
+  liveMapExpandedAnchors: new Set(),
   liveLayoutPending: true,
   liveLayoutRunning: false,
   liveLayoutMode: localStorage.getItem("reticulated.live-layout-mode") || "hybrid_bus",
@@ -986,7 +990,12 @@ function ensureLiveMap() {
   }).addTo(state.liveMap);
   state.liveMapLayers = L.layerGroup().addTo(state.liveMap);
   state.liveMap.setView([20, 0], 2);
-  state.liveMap.on("moveend zoomend", saveLiveMapViewport);
+  state.liveMap.on("moveend", saveLiveMapViewport);
+  state.liveMap.on("zoomend", () => {
+    saveLiveMapViewport();
+    state.liveMapSignature = null;
+    if (state.live && state.liveView === "map") renderLiveMap(state.live);
+  });
   return state.liveMap;
 }
 
@@ -1067,12 +1076,17 @@ function renderLiveMap(snapshot) {
   }
   const renderModel = liveRenderModel(snapshot);
   const topology = buildGeographicTopology(snapshot, renderModel);
+  const visibility = geographicVisibility(
+    topology, map.getZoom(), state.liveMapExpandedAnchors
+  );
   const mapSignature = JSON.stringify({
     nodes: topology.nodes.map((node) => [node.id, node.kind, mapNodeLabel(node)]),
     edges: topology.edges.map((edge) => [edge.id, edge.source, edge.target, edge.kind, edge.hops]),
     locations: Array.from(topology.locations.entries()).map(([id, item]) => [
       id, item.latitude, item.longitude, item.actual, item.anchorId,
     ]),
+    detail: visibility.level,
+    expanded: Array.from(state.liveMapExpandedAnchors).sort(),
   });
   if (mapSignature === state.liveMapSignature) return;
   state.liveMapSignature = mapSignature;
@@ -1082,6 +1096,7 @@ function renderLiveMap(snapshot) {
   let mappedEdges = 0;
   const nodeById = new Map(topology.nodes.map((node) => [node.id, node]));
   for (const edge of topology.edges) {
+    if (!visibility.visible.has(edge.source) || !visibility.visible.has(edge.target)) continue;
     const source = topology.locations.get(edge.source);
     const target = topology.locations.get(edge.target);
     if (!source || !target) continue;
@@ -1093,6 +1108,7 @@ function renderLiveMap(snapshot) {
     ).addTo(state.liveMapLayers);
   }
   for (const [id, location] of topology.locations) {
+    if (!visibility.visible.has(id)) continue;
     const node = nodeById.get(id);
     if (!node) continue;
     const latlng = [location.latitude, location.longitude];
@@ -1120,15 +1136,37 @@ function renderLiveMap(snapshot) {
       state.liveMapOpenNodeId = id;
     }
   }
+  for (const group of visibility.groups) {
+    const label = group.semanticGroup.replaceAll(":", " · ");
+    const marker = L.circleMarker([group.latitude, group.longitude], {
+      radius: Math.min(16, 7 + Math.log2(group.count + 1) * 2),
+      color: "#f8fafc", weight: 2, fillColor: "#334155", fillOpacity: 0.88,
+      dashArray: "4 3",
+    });
+    marker.bindTooltip(group.count + " " + label + " nodes · click to expand", {
+      direction: "top", opacity: 0.92,
+    });
+    marker.bindPopup('<div class="live-map-popup"><strong>' + group.count + " " +
+      escapeHtml(label) + ' nodes</strong><div class="muted">Collapsed schematic branch near ' +
+      escapeHtml(mapNodeLabel(nodeById.get(group.anchorId) || { id: group.anchorId })) +
+      ". Click the bubble to reveal this anchor's complete topology.</div></div>");
+    marker.on("click", () => {
+      state.liveMapExpandedAnchors.add(group.anchorId);
+      state.liveMapSignature = null;
+      renderLiveMap(snapshot);
+    });
+    marker.addTo(state.liveMapLayers);
+  }
 
   summary.innerHTML = '<strong>' + topology.actualCount + " geographic anchor" +
     (topology.actualCount === 1 ? "" : "s") + "</strong> · " + topology.syntheticCount +
     " schematic neighbor" + (topology.syntheticCount === 1 ? "" : "s") + " · " +
-    mappedEdges + " mapped topology relationship" + (mappedEdges === 1 ? "" : "s") +
+    mappedEdges + " visible relationship" + (mappedEdges === 1 ? "" : "s") + " · " +
+    visibility.groups.length + " collapsed branch" + (visibility.groups.length === 1 ? "" : "es") +
     (topology.omittedCount ? " · " + topology.omittedCount + " disconnected/unlocated omitted" : "") +
     '<div class="map-legend"><span class="hop-1">observed / 1 hop</span><span class="hop-2">2 hops</span>' +
     '<span class="hop-3">3 hops</span><span class="hop-4">4+ / unknown</span></div>' +
-    '<div class="muted">Solid-outline nodes have RMAP coordinates. Dashed-outline nodes are schematic topology clustered near their closest geographic anchor; their plotted position is not a location claim.</div>';
+    '<div class="muted">' + visibility.level + ' detail · Solid-outline nodes have RMAP coordinates. Dashed nodes and bubbles are schematic; zoom or click a bubble for more topology.</div>';
   if (!state.liveMapHasInitialView) {
     state.liveMapHasInitialView = true;
     if (!restoreLiveMapViewport() && bounds.length) {
@@ -2205,6 +2243,7 @@ document.getElementById("live-reporter").onchange = (event) => {
   state.liveLayoutSaveGeneration += 1;
   state.liveMapHasInitialView = false;
   state.liveMapSignature = null;
+  state.liveMapExpandedAnchors.clear();
   cy.elements().remove();
   loadLiveState();
 };
@@ -2312,6 +2351,12 @@ document.getElementById("btn-live-rmap").onclick = () => {
 };
 document.getElementById("btn-live-topology").onclick = () => setLiveView("topology");
 document.getElementById("btn-live-map").onclick = () => setLiveView("map");
+document.getElementById("btn-live-map-collapse").onclick = () => {
+  state.liveMapExpandedAnchors.clear();
+  state.liveMapOpenNodeId = null;
+  state.liveMapSignature = null;
+  if (state.live) renderLiveMap(state.live);
+};
 document.getElementById("btn-live-destinations").onclick = () => {
   state.showLiveDestinationSummaries = !state.showLiveDestinationSummaries;
   state.liveLayoutPending = true;
