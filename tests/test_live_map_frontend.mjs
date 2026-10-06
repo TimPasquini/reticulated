@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildGeographicTopology,
+  deepPathNodeIds,
   geographicDetailLevel,
   geographicVisibility,
 } from "../web/live-map.mjs";
@@ -65,6 +66,29 @@ test("geographic topology anchors RMAP nodes and schematically places connected 
     };
     assert.ok(incoming.x * outgoing.x + incoming.y * outgoing.y > 0);
   }
+});
+
+test("map hides 4+ hop branches unless explicitly enabled", () => {
+  const nodes = [
+    { id: "anchor", kind: "rmap_transport", item: {} },
+    { id: "ghost", kind: "ghost_segment", item: {} },
+    { id: "destination", kind: "announced_destination", item: {} },
+  ];
+  const topology = {
+    nodes,
+    edges: [
+      { source: "anchor", target: "ghost", hops: 4, hop_tier: "4+" },
+      { source: "ghost", target: "destination", hops: 1, kind: "ghost_completion" },
+    ],
+    locations: new Map(nodes.map((node, index) => [node.id, {
+      latitude: 40 + index, longitude: -75, actual: index === 0,
+      anchorId: "anchor", distance: index,
+    }])),
+  };
+
+  assert.deepEqual(Array.from(deepPathNodeIds(topology)).sort(), ["destination", "ghost"]);
+  assert.deepEqual(Array.from(geographicVisibility(topology, 9).visible), ["anchor"]);
+  assert.equal(geographicVisibility(topology, 9, new Set(), true).visible.size, 3);
 });
 
 test("unconnected nodes without coordinates are omitted instead of geolocated by guess", () => {

@@ -69,6 +69,7 @@ const state = {
   liveMap: null,
   liveMapLayers: null,
   liveMapHasInitialView: false,
+  liveMapShowDeepPaths: false,
   liveMapSignature: null,
   liveMapOpenNodeId: null,
   liveMapExpandedAnchors: new Set(),
@@ -264,7 +265,12 @@ const cy = cytoscape({
       "color": "#fff0bd", "text-max-width": 120,
     }},
     { selector: "node.live-ghost", style: {
-      "shape": "round-hexagon", "width": 92, "height": 54,
+      // Cytoscape 3.30's round-polygon intersection cache can lose its
+      // generated corner table during a live remove/add cycle, taking the
+      // entire canvas renderer down in getOrCreateCorners(). A regular
+      // hexagon retains the topology semantics and uses the stable polygon
+      // intersection path.
+      "shape": "hexagon", "width": 92, "height": 54,
       "background-color": "#382f45", "border-color": "#bb86d9", "border-width": 3,
       "border-style": "dashed", "color": "#eadcf4", "label": "data(label)",
       "text-valign": "center", "text-halign": "center", "font-size": 9,
@@ -1078,7 +1084,7 @@ function renderLiveMap(snapshot) {
   const renderModel = liveRenderModel(snapshot);
   const topology = buildGeographicTopology(snapshot, renderModel);
   const visibility = geographicVisibility(
-    topology, map.getZoom(), state.liveMapExpandedAnchors
+    topology, map.getZoom(), state.liveMapExpandedAnchors, state.liveMapShowDeepPaths
   );
   const mapSignature = JSON.stringify({
     nodes: topology.nodes.map((node) => [node.id, node.kind, mapNodeLabel(node)]),
@@ -1087,6 +1093,7 @@ function renderLiveMap(snapshot) {
       id, item.latitude, item.longitude, item.actual, item.anchorId,
     ]),
     detail: visibility.level,
+    showDeepPaths: state.liveMapShowDeepPaths,
     expanded: Array.from(state.liveMapExpandedAnchors).sort(),
   });
   if (mapSignature === state.liveMapSignature) return;
@@ -1097,6 +1104,9 @@ function renderLiveMap(snapshot) {
   let mappedEdges = 0;
   const nodeById = new Map(topology.nodes.map((node) => [node.id, node]));
   for (const edge of topology.edges) {
+    if (!state.liveMapShowDeepPaths && (
+      edge.hop_tier === "4+" || Number(edge.hops) >= 4 || edge.unknown_hops === "3+"
+    )) continue;
     if (!visibility.visible.has(edge.source) || !visibility.visible.has(edge.target)) continue;
     const source = topology.locations.get(edge.source);
     const target = topology.locations.get(edge.target);
@@ -1166,7 +1176,8 @@ function renderLiveMap(snapshot) {
     visibility.groups.length + " collapsed branch" + (visibility.groups.length === 1 ? "" : "es") +
     (topology.omittedCount ? " · " + topology.omittedCount + " disconnected/unlocated omitted" : "") +
     '<div class="map-legend"><span class="hop-1">observed / 1 hop</span><span class="hop-2">2 hops</span>' +
-    '<span class="hop-3">3 hops</span><span class="hop-4">4+ / unknown</span></div>' +
+    '<span class="hop-3">3 hops</span>' +
+    (state.liveMapShowDeepPaths ? '<span class="hop-4">4+ / unknown</span>' : '') + '</div>' +
     '<div class="muted">' + visibility.level + ' detail · Solid-outline nodes have RMAP coordinates. Dashed nodes and bubbles are schematic; zoom or click a bubble for more topology.</div>';
   if (!state.liveMapHasInitialView) {
     state.liveMapHasInitialView = true;
@@ -2352,6 +2363,13 @@ document.getElementById("btn-live-rmap").onclick = () => {
 };
 document.getElementById("btn-live-topology").onclick = () => setLiveView("topology");
 document.getElementById("btn-live-map").onclick = () => setLiveView("map");
+document.getElementById("btn-live-map-deep").onclick = () => {
+  state.liveMapShowDeepPaths = !state.liveMapShowDeepPaths;
+  document.getElementById("btn-live-map-deep").textContent =
+    state.liveMapShowDeepPaths ? "Hide 4+ hops" : "Show 4+ hops";
+  state.liveMapSignature = null;
+  if (state.live) renderLiveMap(state.live);
+};
 document.getElementById("btn-live-map-collapse").onclick = () => {
   state.liveMapExpandedAnchors.clear();
   state.liveMapOpenNodeId = null;
@@ -2733,7 +2751,41 @@ async function runElkLayeredLayout({ animate = true, fitViewport = true, clearPi
   }
 }
 
-function runLiveLayout(animate, fitViewport = true, incremental = false) {
+function hybridBusPositionsInWorker(nodes, edges, positions, pinnedIds) {
+  if (typeof Worker === "undefined") {
+    return Promise.resolve(hybridBusPositions(nodes, edges, positions, pinnedIds));
+  }
+  return new Promise((resolve, reject) => {
+    const worker = new Worker("/live-layout-worker.mjs?v=1", { type: "module" });
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.terminate();
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      finish(reject, new Error("hybrid topology solve exceeded 6 seconds"));
+    }, 6000);
+    worker.onmessage = (event) => {
+      if (event.data && event.data.error) {
+        finish(reject, new Error(event.data.error));
+        return;
+      }
+      finish(resolve, {
+        positions: event.data.positions || positions,
+        busEdgeIds: new Set(event.data.busEdgeIds || []),
+      });
+    };
+    worker.onerror = (event) => finish(reject, new Error(event.message || "layout worker failed"));
+    worker.postMessage({
+      nodes, edges, positions, pinnedIds: Array.from(pinnedIds || []),
+    });
+  });
+}
+
+async function runLiveLayout(animate, fitViewport = true, incremental = false) {
   if (!state.live || !cy.nodes().length || state.liveLayoutRunning) return;
   state.liveLayoutRunning = true;
   state.liveLayoutSaveGeneration += 1;
@@ -2761,7 +2813,7 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
     try { if (activeLayout) activeLayout.stop(); } catch (_) { /* best-effort recovery */ }
     console.warn("Reticulated layout watchdog recovered an unfinished layout");
     finish("timed out and recovered");
-  }, 8000);
+  }, 10000);
   // Rebuild every unpinned branch from topology-aware seeds on an explicit
   // Layout request. Only pinned coordinates act as anchors; a bad historical
   // row must not remain authoritative merely because it is currently drawn.
@@ -2807,12 +2859,21 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
 
   let layoutPositions = seeded;
   let busEdgeIds = new Set();
+  let hybridFallback = false;
   if (state.liveLayoutMode === "hybrid_bus") {
-    const hybrid = hybridBusPositions(
-      graphNodes, graphEdges, seeded, state.livePinned
-    );
-    layoutPositions = hybrid.positions;
-    busEdgeIds = hybrid.busEdgeIds;
+    try {
+      const hybrid = await hybridBusPositionsInWorker(
+        graphNodes, graphEdges, seeded, state.livePinned
+      );
+      if (finished) return;
+      layoutPositions = hybrid.positions;
+      busEdgeIds = hybrid.busEdgeIds;
+    } catch (error) {
+      // The topology seed remains a valid bounded fallback. Most importantly,
+      // a pathological graph can no longer monopolise the browser UI thread.
+      hybridFallback = true;
+      console.warn("Hybrid layout used its bounded topology fallback", error);
+    }
   }
   cy.batch(() => {
     cy.edges("[liveKind]").forEach((edge) => {
@@ -2846,7 +2907,9 @@ function runLiveLayout(animate, fitViewport = true, incremental = false) {
     activeLayout = layout;
     layout.one("layoutstop", () => {
       finish(state.liveLayoutMode === "hybrid_bus"
-        ? "hybrid transfer buses + semantic fork clusters"
+        ? (hybridFallback
+          ? "bounded topology fallback (hybrid worker timed out)"
+          : "hybrid transfer buses + semantic fork clusters")
         : "radial topology clusters");
     });
     layout.run();

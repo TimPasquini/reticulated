@@ -36,14 +36,41 @@ export function geographicDetailLevel(zoom) {
   return "overview";
 }
 
-export function geographicVisibility(topology, zoom, expandedAnchors = new Set()) {
+export function deepPathNodeIds(topology) {
+  const deep = new Set();
+  const outgoing = new Map();
+  for (const edge of topology.edges || []) {
+    if (!outgoing.has(edge.source)) outgoing.set(edge.source, []);
+    outgoing.get(edge.source).push(edge);
+    if (edge.hop_tier === "4+" || Number(edge.hops) >= 4 || edge.unknown_hops === "3+") {
+      deep.add(edge.target);
+    }
+  }
+  // Carry the classification through the synthetic completion edge so a
+  // hidden 4+ hop ghost does not leave its destination floating on the map.
+  const queue = Array.from(deep);
+  for (let index = 0; index < queue.length; index += 1) {
+    for (const edge of outgoing.get(queue[index]) || []) {
+      if (deep.has(edge.target)) continue;
+      deep.add(edge.target);
+      queue.push(edge.target);
+    }
+  }
+  return deep;
+}
+
+export function geographicVisibility(
+  topology, zoom, expandedAnchors = new Set(), showDeepPaths = false
+) {
   const expanded = expandedAnchors instanceof Set
     ? expandedAnchors : new Set(expandedAnchors || []);
   const level = geographicDetailLevel(zoom);
   const visible = new Set();
   const nodeById = new Map((topology.nodes || []).map((node) => [node.id, node]));
+  const deepNodes = showDeepPaths ? new Set() : deepPathNodeIds(topology);
   for (const [id, location] of topology.locations || []) {
     const node = nodeById.get(id) || {};
+    if (deepNodes.has(id) && !location.actual) continue;
     const anchorExpanded = expanded.has(location.anchorId);
     const structural = ["root", "interface", "transport", "rmap_transport"].includes(node.kind);
     if (
@@ -55,6 +82,7 @@ export function geographicVisibility(topology, zoom, expandedAnchors = new Set()
   const grouped = new Map();
   for (const [id, location] of topology.locations || []) {
     if (visible.has(id) || location.actual) continue;
+    if (deepNodes.has(id)) continue;
     const node = nodeById.get(id);
     if (!node) continue;
     const key = location.anchorId + "|" + semanticGroup(node);
@@ -75,7 +103,7 @@ export function geographicVisibility(topology, zoom, expandedAnchors = new Set()
     latitude: group.latitude / group.members.length,
     longitude: group.longitude / group.members.length,
   })).sort((left, right) => left.id.localeCompare(right.id));
-  return { level, visible, groups };
+  return { level, visible, groups, hiddenDeepCount: deepNodes.size };
 }
 
 export function buildGeographicTopology(snapshot, renderModel) {
