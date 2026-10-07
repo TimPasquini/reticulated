@@ -177,7 +177,7 @@ class RNSReportListener:
         config_dir: str | None = None,
         max_bytes: int = DEFAULT_MAX_BYTES,
         max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
-        announce_interval: float = 0.0,
+        announce_interval: float = 300.0,
     ) -> None:
         self.registry = registry
         self.identity_path = identity_path
@@ -224,8 +224,8 @@ class RNSReportListener:
             allowed_list=[bytes.fromhex(value) for value in self.allowlist],
             auto_compress=True,
         )
+        self.destination.announce(app_data=b"Reticulated topology ingest v1")
         if self.announce_interval > 0:
-            self.destination.announce(app_data=b"Reticulated topology ingest v1")
             threading.Thread(target=self._announce_loop, daemon=True).start()
         return self.destination_hash or ""
 

@@ -90,8 +90,6 @@ Optional live-mode settings are:
   event (default `512`; full payload length and SHA-256 are still recorded)
 - `LIVE_ANNOUNCE_DB_FILE`: durable, deduplicated announce history database
 - `LIVE_LAYOUTS_FILE`: persistent named and autosaved live graph layouts
-- `LIVE_RNS_INGEST_ANNOUNCE_INTERVAL`: opt-in interval for unsolicited ingest
-  destination announces (default `0`, disabled)
 
 Live paths show only what the local transport reports. Solid edges represent
 the local instance, its interfaces, and reported next-hop transports. Dashed

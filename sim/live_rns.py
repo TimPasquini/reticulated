@@ -517,10 +517,7 @@ def topology_snapshot(
     # of path dictionaries on every five-second API poll.
     state = dict(source)
     destinations = state.get("destinations", [])
-    source_edges = list(state.get("edges", []))
-    # Enrichment adds presentation edges. Keep the registry's normalized
-    # snapshot immutable across repeated API projections.
-    state["edges"] = source_edges
+    source_edges = state.get("edges", [])
     counts_by_transport: dict[str, int] = {}
     for destination in destinations:
         via = destination.get("via")
@@ -610,54 +607,6 @@ def topology_snapshot(
         state["rmap_interfaces"] = []
         state["rmap_matches"] = []
         state["rmap_attachments"] = []
-    # A configured remote socket is observed configuration, not an identified
-    # Reticulum transport. Still expose it as a structural endpoint when an
-    # otherwise-empty client interface has neither a current next hop/peer nor
-    # an RMAP identity match. This keeps real backbone configuration visible
-    # without inventing a router hash.
-    occupied_interfaces = {
-        edge.get("source") for edge in state.get("edges", [])
-        if edge.get("kind") in {
-            "observed_next_hop", "observed_peer_interface", "announce_next_hop"
-        }
-    }
-    matched_interfaces = {
-        match.get("interface_id") for match in state.get("rmap_matches", [])
-        if match.get("kind") in {"remote_endpoint", "i2p_endpoint"}
-    }
-    configured_endpoints = []
-    for interface in state.get("interfaces", []):
-        interface_id = interface.get("id")
-        remote_host = interface.get("remote_host")
-        if (
-            not interface_id or not remote_host
-            or interface_id in occupied_interfaces
-            or interface_id in matched_interfaces
-        ):
-            continue
-        remote_port = interface.get("remote_port")
-        endpoint = str(remote_host) + (
-            f":{remote_port}" if remote_port is not None else ""
-        )
-        endpoint_id = f"configured-endpoint:{_stable_fragment(interface_id + '|' + endpoint)}"
-        configured_endpoints.append({
-            "id": endpoint_id,
-            "endpoint": endpoint,
-            "remote_host": remote_host,
-            "remote_port": remote_port,
-            "interface_id": interface_id,
-            "reporter_id": interface.get("reporter_id"),
-            "certainty": "configured_endpoint",
-        })
-        state["edges"].append({
-            "id": f"edge:{interface_id}:{endpoint_id}",
-            "source": interface_id,
-            "target": endpoint_id,
-            "kind": "configured_endpoint",
-            "certainty": "configured_endpoint",
-            "reporter_id": interface.get("reporter_id"),
-        })
-    state["configured_endpoints"] = configured_endpoints
     return state
 
 

@@ -221,14 +221,6 @@ const cy = cytoscape({
     { selector: "node.live-interface.backbone", style: { "background-color": "#285b78", "border-color": "#4fa3cf" }},
     { selector: "node.live-interface.path-only", style: { "border-style": "dashed", "opacity": 0.75 }},
     { selector: "node.live-interface.rmap-matched", style: { "border-width": 3, "border-color": "#56b9bd" }},
-    { selector: "node.live-configured-endpoint", style: {
-      "shape": "round-rectangle", "width": 118, "height": 38,
-      "background-color": "#273543", "border-color": "#70879a",
-      "border-width": 2, "border-style": "dashed",
-      "label": "data(label)", "color": "#cbd7df", "text-valign": "center",
-      "text-halign": "center", "font-size": 9, "text-wrap": "wrap",
-      "text-max-width": 112,
-    }},
     { selector: "node.live-transport", style: {
       "shape": "hexagon", "width": 50, "height": 50, "background-color": "#3d7c59",
       "label": "data(label)", "color": "#eaffef", "text-valign": "center", "text-halign": "center",
@@ -332,10 +324,6 @@ const cy = cytoscape({
     { selector: "edge.live-historical", style: {
       "line-color": "#e4b84a", "line-style": "dotted",
       "target-arrow-shape": "triangle", "target-arrow-color": "#e4b84a",
-    }},
-    { selector: "edge.live-configured", style: {
-      "line-color": "#70879a", "line-style": "dashed",
-      "target-arrow-shape": "triangle", "target-arrow-color": "#70879a",
     }},
     { selector: "edge.live-layout-bus", style: {
       "width": 4, "opacity": 0.72, "curve-style": "straight",
@@ -656,9 +644,6 @@ function liveRenderModel(snapshot) {
   for (const match of snapshot.rmap_matches || []) {
     if (!rmapInterfaceMatches[match.interface_id]) rmapInterfaceMatches[match.interface_id] = [];
     rmapInterfaceMatches[match.interface_id].push(match);
-  }
-  for (const endpoint of snapshot.configured_endpoints || []) {
-    destinationNodes.push({ kind: "configured_endpoint", item: endpoint });
   }
   return {
     destinationNodes: destinationNodes,
@@ -1360,8 +1345,6 @@ function rebuildLive(snapshot) {
       els.push({ group: "nodes", data: { id: item.id, label: rmapPrefix + aspect + "\nidentity " + shortHash(item.identity_hash) + "\n" + services + " destination" + (services === 1 ? "" : "s"), liveKind: "announce_identity", item: displayItem }, classes: "live-destination announced" + rmapClass, position: positions[item.id] });
     } else if (entry.kind === "ghost_segment") {
       els.push({ group: "nodes", data: { id: item.id, label: item.label, liveKind: "ghost_segment", item: item }, classes: "live-ghost", position: positions[item.id] });
-    } else if (entry.kind === "configured_endpoint") {
-      els.push({ group: "nodes", data: { id: item.id, label: "configured endpoint\n" + item.endpoint, liveKind: "configured_endpoint", item: item }, classes: "live-configured-endpoint", position: positions[item.id] });
     } else {
       const hops = item.hops === null || item.hops === undefined ? "? hops" : item.hops + " hop" + (item.hops === 1 ? "" : "s");
       els.push({ group: "nodes", data: { id: item.id, label: rmapPrefix + shortHash(item.hash) + "\n" + hops, liveKind: "destination", item: displayItem }, classes: "live-destination" + rmapClass, position: positions[item.id] });
@@ -1399,11 +1382,10 @@ function rebuildLive(snapshot) {
   for (const edge of renderModel.edges) {
     const incomplete = edge.certainty === "incomplete" || edge.kind === "unknown_segment" || edge.kind === "ghost_completion";
     const historical = edge.certainty === "historical_observation";
-    const configured = edge.certainty === "configured_endpoint";
     els.push({
       group: "edges",
       data: { id: edge.id, source: edge.source, target: edge.target, label: liveEdgeLabel(edge), liveKind: "edge", item: edge },
-      classes: (configured ? "live-configured" : (incomplete ? "live-incomplete" : (historical ? "live-historical" : "live-observed"))) + (edge.kind === "known_path" ? liveHopClass(edge.hops, edge.hop_tier) : ""),
+      classes: (incomplete ? "live-incomplete" : (historical ? "live-historical" : "live-observed")) + (edge.kind === "known_path" ? liveHopClass(edge.hops, edge.hop_tier) : ""),
     });
   }
   const nextElementIds = new Set(els.map((element) => element.data.id));
@@ -1700,10 +1682,6 @@ function showLivePanel(el) {
       row("Observed total hops", item.observed_hops) + row("Expected stitched hops", item.expected_hops) +
       row("Hop-count delta", item.hop_delta) + row("Destination", item.destination_hash) +
       '<div class="muted">This is not a fabricated router. It represents topology that the observations require but do not identify.</div>';
-  } else if (kind === "configured_endpoint") {
-    title.textContent = "Configured network endpoint";
-    body.innerHTML = row("Endpoint", item.endpoint) + row("Reporter", item.reporter_id) +
-      '<div class="muted">This socket target is directly reported by interface configuration. It is not an identified Reticulum transport and no current selected path was observed through it.</div>';
   }
 }
 

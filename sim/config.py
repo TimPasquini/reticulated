@@ -69,7 +69,7 @@ LIVE_RNS_INGEST_ALLOWLIST = os.environ.get(
     "LIVE_RNS_INGEST_ALLOWLIST", os.path.join(DATA_DIR, "reporters.json")
 )
 LIVE_RNS_INGEST_ANNOUNCE_INTERVAL = float(
-    os.environ.get("LIVE_RNS_INGEST_ANNOUNCE_INTERVAL", "0")
+    os.environ.get("LIVE_RNS_INGEST_ANNOUNCE_INTERVAL", "300")
 )
 LIVE_LAYOUTS_FILE = os.environ.get(
     "LIVE_LAYOUTS_FILE", os.path.join(DATA_DIR, "live-layouts.json")

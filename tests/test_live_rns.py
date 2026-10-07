@@ -275,48 +275,6 @@ class LiveRNSNormalizationTests(unittest.TestCase):
             {"remote_endpoint", "i2p_endpoint", "local_publication"},
         )
 
-    def test_empty_backbone_retains_configured_endpoint_without_inventing_transport(self):
-        normalized = LiveRNSProvider.normalize({
-            "transport_id": "patroon",
-            "interfaces": [{
-                "name": "BackboneInterface[Montreal/207.174.40.24:4242]",
-                "short_name": "Montreal Backbone",
-                "hash": "backbone-hash",
-                "type": "BackboneClientInterface",
-                "status": True,
-            }],
-        }, [], label="Patroon")
-
-        projected = topology_snapshot(normalized)
-
-        self.assertEqual(len(projected["configured_endpoints"]), 1)
-        endpoint = projected["configured_endpoints"][0]
-        self.assertEqual(endpoint["endpoint"], "207.174.40.24:4242")
-        edge = next(
-            item for item in projected["edges"]
-            if item["kind"] == "configured_endpoint"
-        )
-        self.assertEqual(edge["source"], "interface:backbone-hash")
-        self.assertEqual(edge["target"], endpoint["id"])
-        self.assertEqual(projected["transports"], [])
-
-    def test_selected_next_hop_replaces_configured_endpoint_placeholder(self):
-        normalized = LiveRNSProvider.normalize({
-            "interfaces": [{
-                "name": "BackboneInterface[NYC/lga.example.net:4242]",
-                "short_name": "NYC",
-                "hash": "backbone-hash",
-                "type": "BackboneClientInterface",
-            }],
-        }, [{
-            "hash": "destination", "via": "next-hop", "hops": 2,
-            "interface": "BackboneInterface[NYC/lga.example.net:4242]",
-        }], label="Patroon")
-
-        projected = topology_snapshot(normalized)
-
-        self.assertEqual(projected["configured_endpoints"], [])
-
 
 class LiveRNSCollectionTests(unittest.TestCase):
     def test_large_sources_use_independent_cached_refresh_intervals(self):
