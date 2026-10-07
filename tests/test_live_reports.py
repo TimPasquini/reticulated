@@ -411,6 +411,19 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(network["rmap_summary"]["attachment_count"], 1)
         self.assertEqual(network["rmap_attachments"][0]["source"], "transport:patroon")
         self.assertEqual(network["rmap_attachments"][0]["target"], "transport:nyc-transport")
+        self.assertTrue(any(
+            transport["id"] == "transport:nyc-transport"
+            and transport.get("rmap") is True
+            for transport in network["transports"]
+        ))
+        attachment_edge = next(
+            edge for edge in network["edges"]
+            if edge.get("kind") == "rmap_endpoint_attachment"
+        )
+        self.assertEqual(
+            (attachment_edge["source"], attachment_edge["target"]),
+            ("reporter:patroon:interface:nyc", "transport:nyc-transport"),
+        )
 
     def test_discovered_service_names_matching_destination_across_reporters(self):
         destination_hash = "c" * 32

@@ -274,6 +274,16 @@ class LiveRNSNormalizationTests(unittest.TestCase):
             {match["kind"] for match in projected["rmap_matches"]},
             {"remote_endpoint", "i2p_endpoint", "local_publication"},
         )
+        self.assertTrue(any(
+            item["id"] == "transport:nyc-transport"
+            for item in projected["transports"]
+        ))
+        self.assertTrue(any(
+            edge["kind"] == "rmap_endpoint_attachment"
+            and edge["source"] == "interface:backbone-hash"
+            and edge["target"] == "transport:nyc-transport"
+            for edge in projected["edges"]
+        ))
 
 
 class LiveRNSCollectionTests(unittest.TestCase):

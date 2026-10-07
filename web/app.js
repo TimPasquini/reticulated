@@ -1382,10 +1382,11 @@ function rebuildLive(snapshot) {
   for (const edge of renderModel.edges) {
     const incomplete = edge.certainty === "incomplete" || edge.kind === "unknown_segment" || edge.kind === "ghost_completion";
     const historical = edge.certainty === "historical_observation";
+    const rmapAttachment = edge.kind === "rmap_endpoint_attachment";
     els.push({
       group: "edges",
       data: { id: edge.id, source: edge.source, target: edge.target, label: liveEdgeLabel(edge), liveKind: "edge", item: edge },
-      classes: (incomplete ? "live-incomplete" : (historical ? "live-historical" : "live-observed")) + (edge.kind === "known_path" ? liveHopClass(edge.hops, edge.hop_tier) : ""),
+      classes: (rmapAttachment ? "live-attachment" : (incomplete ? "live-incomplete" : (historical ? "live-historical" : "live-observed"))) + (edge.kind === "known_path" ? liveHopClass(edge.hops, edge.hop_tier) : ""),
     });
   }
   const nextElementIds = new Set(els.map((element) => element.data.id));

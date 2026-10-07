@@ -512,10 +512,16 @@ def topology_snapshot(
     include_announces: bool = False,
 ) -> dict[str, Any]:
     """Project a full normalized report into the requested API representation."""
-    # This projection only replaces top-level collections; it never mutates
-    # normalized objects. A shallow copy avoids duplicating tens of thousands
-    # of path dictionaries on every five-second API poll.
+    # Avoid duplicating tens of thousands of destination dictionaries on every
+    # poll, but copy the smaller collections that enrichment extends below.
     state = dict(source)
+    # Projection may add announce and RMAP topology. Copy mutable collections
+    # so repeated API requests cannot modify the registry's normalized source.
+    state["transports"] = [
+        {**item, "interface_ids": list(item.get("interface_ids", []))}
+        for item in source.get("transports", [])
+    ]
+    state["edges"] = [dict(item) for item in source.get("edges", [])]
     destinations = state.get("destinations", [])
     source_edges = state.get("edges", [])
     counts_by_transport: dict[str, int] = {}
@@ -560,6 +566,53 @@ def topology_snapshot(
         {match["interface_id"] for match in state["rmap_matches"]}
     )
     state["rmap_summary"]["attachment_count"] = len(state["rmap_attachments"])
+    if include_rmap:
+        root_ids = {
+            root.get("id")
+            for root in (state.get("reporter_roots") or [state.get("root", {})])
+        }
+        transports_by_id = {
+            transport.get("id"): transport for transport in state["transports"]
+        }
+        edge_pairs = {
+            (edge.get("source"), edge.get("target")) for edge in state["edges"]
+        }
+        matches_by_attachment = {
+            (match.get("interface_id"), f"transport:{match.get('transport_id')}"): match
+            for match in state["rmap_matches"] if match.get("transport_id")
+        }
+        for attachment in state["rmap_attachments"]:
+            target_id = attachment.get("target")
+            interface_id = attachment.get("via_interface_id")
+            if not target_id or not interface_id or target_id in root_ids:
+                continue
+            match = matches_by_attachment.get((interface_id, target_id), {})
+            transport = transports_by_id.get(target_id)
+            if transport is None:
+                transport = {
+                    "id": target_id,
+                    "hash": attachment.get("remote_transport_id"),
+                    "interface_ids": [interface_id],
+                    "observed_by": [],
+                    "rmap": True,
+                    "rmap_records": [match["record"]] if match.get("record") else [],
+                }
+                state["transports"].append(transport)
+                transports_by_id[target_id] = transport
+            elif interface_id not in transport["interface_ids"]:
+                transport["interface_ids"].append(interface_id)
+            pair = (interface_id, target_id)
+            if pair in edge_pairs:
+                continue
+            state["edges"].append({
+                "id": f"edge:rmap:{interface_id}:{target_id}",
+                "source": interface_id,
+                "target": target_id,
+                "kind": "rmap_endpoint_attachment",
+                "certainty": attachment.get("certainty"),
+                "rmap_attachment": attachment,
+            })
+            edge_pairs.add(pair)
     announce_capture = state.get("announces")
     if not isinstance(announce_capture, dict):
         announce_capture = {"active": False, "events": [], "error": None}
