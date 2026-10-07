@@ -1459,6 +1459,7 @@ function updateLiveHealth(snapshot) {
     health.textContent = "Reporter stale · last received " + Math.round(reporter.age_seconds || 0) + "s ago";
   } else {
     const destinationCount = (snapshot.path_summary || {}).destination_count ?? (snapshot.destinations || []).length;
+    const routeObservationCount = (snapshot.path_summary || {}).route_observation_count;
     const rmapCount = (snapshot.rmap_summary || {}).record_count || 0;
     const rmapMatched = (snapshot.rmap_summary || {}).matched_interface_count || 0;
     const announceCount = (snapshot.announce_summary || {}).event_count || 0;
@@ -1466,7 +1467,10 @@ function updateLiveHealth(snapshot) {
     const announceSuppressed = (snapshot.announce_summary || {}).suppressed_destination_count || 0;
     health.textContent = (snapshot.interfaces || []).length + " interfaces · " +
       (snapshot.transports || []).length + " next hops · " +
-      destinationCount + " known paths · " + rmapCount + " RMAP records · " +
+      destinationCount + " known destinations" +
+      (routeObservationCount !== undefined && routeObservationCount !== destinationCount
+        ? " · " + routeObservationCount + " reporter route observations"
+        : "") + " · " + rmapCount + " RMAP records · " +
       announceCount + " captured announces · " + announceMapped + " mapped" +
       (announceSuppressed ? " (" + announceSuppressed + " retained off-graph)" : "") + " · " + rmapMatched +
       " interface matches · received " + Math.round(reporter.age_seconds || 0) + "s ago";

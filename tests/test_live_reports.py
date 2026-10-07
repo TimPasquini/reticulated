@@ -276,7 +276,7 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(conflicting["hop_delta"], 1)
         self.assertEqual(conflicting["unknown_hops"], 1)
 
-    def test_network_unifies_reporter_roots_and_keeps_closest_path_observation(self):
+    def test_network_unifies_destination_but_keeps_each_reporters_path_observation(self):
         fedora = snapshot("Fedora", observed=("patroon-hash",))
         fedora["interfaces"] = [
             {"id": "interface:lan", "name": "Garage LAN"},
@@ -324,6 +324,16 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(len(network["destinations"]), 1)
         self.assertEqual(network["destinations"][0]["reporter_id"], "patroon")
         self.assertEqual(network["destinations"][0]["hops"], 2)
+        shared_edges = [
+            edge for edge in network["edges"]
+            if edge["kind"] == "known_path"
+            and edge["target"] == "destination:shared"
+        ]
+        self.assertEqual(len(shared_edges), 2)
+        self.assertEqual(
+            {edge["reporter_id"] for edge in shared_edges},
+            {"fedora", "patroon"},
+        )
         self.assertTrue(any(
             edge["source"] == "reporter:fedora" and edge["kind"] == "observed_interface"
             for edge in network["edges"]
@@ -336,9 +346,13 @@ class LiveReportRegistryTests(unittest.TestCase):
         self.assertEqual(peer["parent_interface_id"], "reporter:fedora:interface:lan")
         self.assertEqual(compact["destinations"], [])
         self.assertEqual(compact["path_summary"]["destination_count"], 1)
-        self.assertEqual(compact["path_summary"]["by_transport"], {"backbone-hop": 1})
-        self.assertEqual(len(compact["path_groups"]), 1)
-        self.assertEqual(compact["path_groups"][0]["count"], 1)
+        self.assertEqual(compact["path_summary"]["route_observation_count"], 2)
+        self.assertEqual(
+            compact["path_summary"]["by_transport"],
+            {"backbone-hop": 1, "patroon-hash": 1},
+        )
+        self.assertEqual(len(compact["path_groups"]), 2)
+        self.assertTrue(all(group["count"] == 1 for group in compact["path_groups"]))
 
     def test_connected_transport_reporter_refines_primary_path(self):
         patroon = snapshot("Patroon", transport_id="patroon", observed=("vehicle",))

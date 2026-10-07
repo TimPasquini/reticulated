@@ -303,9 +303,17 @@ class LiveReportRegistry:
         local_services: list[dict[str, Any]] = []
         services_by_destination: dict[str, list[dict[str, Any]]] = {}
         edges: list[dict[str, Any]] = []
-        destination_candidates: dict[str, tuple[tuple[Any, ...], dict[str, Any], dict[str, Any]]] = {}
-        path_group_candidates: dict[str, tuple[tuple[Any, ...], dict[str, Any], dict[str, Any]]] = {}
-        path_summary_candidates: dict[str, tuple[tuple[Any, ...], str | None]] = {}
+        # A destination hash is one logical endpoint, but every reporter's
+        # route to it is independent evidence. Keep one canonical destination
+        # node while retaining all observed path edges and compact path-group
+        # inputs. Selecting only the shortest observation here used to erase
+        # whole interface branches from the combined topology.
+        destination_candidates: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
+        destination_edges: dict[tuple[Any, ...], dict[str, Any]] = {}
+        path_group_candidates: dict[
+            tuple[str, str], tuple[dict[str, Any], dict[str, Any]]
+        ] = {}
+        path_summary_observations: list[tuple[str, str | None]] = []
         reporter_metadata: list[dict[str, Any]] = []
         reporter_health: dict[str, dict[str, Any]] = {}
         announce_events_by_id: dict[str, dict[str, Any]] = {}
@@ -464,15 +472,16 @@ class LiveReportRegistry:
                         0 if entry["local"] else 1,
                         reporter_id,
                     )
-                    current_summary = path_summary_candidates.get(destination_hash)
-                    if current_summary is None or score < current_summary[0]:
-                        path_summary_candidates[destination_hash] = (
-                            score,
-                            str(destination.get("via")) if destination.get("via") else None,
-                        )
-                    merged_destination_id = f"reporter:{reporter_id}:destination:{destination_hash}"
+                    path_summary_observations.append((
+                        destination_hash,
+                        str(destination.get("via")) if destination.get("via") else None,
+                    ))
+                    merged_destination_id = f"destination:{destination_hash}"
+                    group_destination_id = (
+                        f"reporter:{reporter_id}:destination:{destination_hash}"
+                    )
                     group_destination = {
-                        "id": merged_destination_id,
+                        "id": group_destination_id,
                         "hash": destination.get("hash"),
                         "hops": destination.get("hops"),
                         "interface_id": id_map.get(destination.get("interface_id"), destination.get("interface_id")),
@@ -484,13 +493,11 @@ class LiveReportRegistry:
                         "kind": "known_path",
                         "hops": edge.get("hops"),
                         "source": id_map.get(edge.get("source"), edge.get("source")),
-                        "target": merged_destination_id,
+                        "target": group_destination_id,
                     }
-                    current_group = path_group_candidates.get(destination_hash)
-                    if current_group is None or score < current_group[0]:
-                        path_group_candidates[destination_hash] = (
-                            score, group_destination, group_edge
-                        )
+                    path_group_candidates[(reporter_id, destination_hash)] = (
+                        group_destination, group_edge
+                    )
                     if (
                         not include_paths
                         and not destination.get("local")
@@ -514,8 +521,21 @@ class LiveReportRegistry:
                     current = destination_candidates.get(destination_hash)
                     if current is None or score < current[0]:
                         destination_candidates[destination_hash] = (
-                            score, candidate_destination, candidate_edge
+                            score, candidate_destination
                         )
+                    route_key = (
+                        candidate_edge.get("source"), candidate_edge.get("target"),
+                        candidate_edge.get("hops"), candidate_edge.get("unknown_hops"),
+                        candidate_edge.get("certainty"),
+                    )
+                    existing_route = destination_edges.get(route_key)
+                    if existing_route is None:
+                        candidate_edge["observed_by"] = [reporter_id]
+                        destination_edges[route_key] = candidate_edge
+                    else:
+                        existing_route["observed_by"] = sorted(set(
+                            existing_route.get("observed_by", []) + [reporter_id]
+                        ))
                     continue
 
                 edges.append({
@@ -547,7 +567,7 @@ class LiveReportRegistry:
             }
 
         destinations = []
-        for _, destination, edge in destination_candidates.values():
+        for _, destination in destination_candidates.values():
             service_matches = services_by_destination.get(str(destination.get("hash") or "").lower(), [])
             if service_matches:
                 destination["local_service"] = service_matches[0]
@@ -555,7 +575,7 @@ class LiveReportRegistry:
                     match["reporter_id"] for match in service_matches
                 })
             destinations.append(destination)
-            edges.append(edge)
+        edges.extend(destination_edges.values())
 
         reporter_roots = list(reporter_roots_by_id.values())
         reporter_roots.sort(key=lambda root: (not root["primary"], root["reporter_id"]))
@@ -592,16 +612,20 @@ class LiveReportRegistry:
         }
         if not include_paths:
             counts_by_transport: dict[str, int] = {}
-            for _, via in path_summary_candidates.values():
+            for _, via in path_summary_observations:
                 if via:
                     counts_by_transport[via] = counts_by_transport.get(via, 0) + 1
             merged["_path_summary"] = {
-                "destination_count": len(path_summary_candidates),
+                "destination_count": len({
+                    destination_hash
+                    for destination_hash, _ in path_summary_observations
+                }),
+                "route_observation_count": len(path_summary_observations),
                 "by_transport": counts_by_transport,
             }
             group_destinations = []
             group_edges = []
-            for _, destination, edge in path_group_candidates.values():
+            for destination, edge in path_group_candidates.values():
                 group_destinations.append(destination)
                 group_edges.append(edge)
             merged["_path_groups"] = _path_groups(group_destinations, group_edges)
