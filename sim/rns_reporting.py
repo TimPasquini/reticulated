@@ -28,6 +28,7 @@ DEFAULT_CHUNK_EXPANDED_BYTES = 8 * 1024 * 1024
 MAX_REPORT_CHUNKS = 256
 CHUNK_TTL = 300.0
 MAX_INFLIGHT_TRANSFERS = 8
+REPORT_TRANSFER_ATTEMPTS = 2
 
 
 def encode_report(reporter_id: str, label: str, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -283,6 +284,8 @@ class RNSReportListener:
                     "version": PROTOCOL_VERSION,
                     "reporter_id": reporter_id,
                     "complete": False,
+                    "transfer_id": data.get("transfer_id"),
+                    "chunk_index": data.get("chunk_index"),
                     **(progress or {}),
                 }
             self.registry.update(reporter_id, snapshot)
@@ -292,6 +295,10 @@ class RNSReportListener:
                 "reporter_id": reporter_id,
                 "complete": True,
                 "received_at": time.time(),
+                **({
+                    "transfer_id": data.get("transfer_id"),
+                    "chunk_index": data.get("chunk_index"),
+                } if isinstance(data, dict) and data.get("encoding") == "gzip-json-chunk" else {}),
                 **(progress or {}),
             }
         except (AttributeError, ValueError) as exc:
@@ -418,12 +425,66 @@ class RNSReportClient:
     ) -> dict[str, Any]:
         if self.identity is None:
             self.start()
-        link = self._ensure_link()
         envelopes = encode_report_chunks(reporter_id, label, snapshot)
-        response: dict[str, Any] = {}
-        for envelope in envelopes:
-            response = self._send_envelope(link, envelope)
-        return response
+        last_error: Exception | None = None
+        for attempt in range(REPORT_TRANSFER_ATTEMPTS):
+            try:
+                link = self._ensure_link()
+                response: dict[str, Any] = {}
+                for envelope in envelopes:
+                    response = self._send_envelope(link, envelope)
+                    installed = self._validate_ack(
+                        response, envelope, len(envelopes)
+                    )
+                    # A replay can supply the last missing piece before the
+                    # final envelope in local order. Stop immediately because
+                    # the listener has atomically installed the snapshot and
+                    # discarded its completed transfer buffer.
+                    if installed:
+                        return response
+                raise ValueError("RNS report transfer remained incomplete")
+            except (OSError, TimeoutError, ValueError) as exc:
+                last_error = exc
+                # A transfer is atomic on the listener. Replaying every chunk
+                # with the same transfer ID safely fills any missing pieces;
+                # replacing the link first also recovers an interrupted RNS
+                # session instead of waiting for the next reporter interval.
+                self.link = None
+                if attempt + 1 >= REPORT_TRANSFER_ATTEMPTS:
+                    raise
+        assert last_error is not None
+        raise last_error
+
+    @staticmethod
+    def _validate_ack(
+        response: dict[str, Any], envelope: dict[str, Any], total: int
+    ) -> bool:
+        if response.get("reporter_id") != envelope.get("reporter_id"):
+            raise ValueError("RNS report acknowledgement has the wrong reporter ID")
+        chunked = envelope.get("encoding") == "gzip-json-chunk"
+        if not chunked:
+            if response.get("complete") is not True:
+                raise ValueError("RNS report was acknowledged but not installed")
+            return True
+        if response.get("transfer_id") != envelope.get("transfer_id"):
+            raise ValueError("RNS report acknowledgement has the wrong transfer ID")
+        try:
+            acknowledged_index = int(response.get("chunk_index"))
+            acknowledged_count = int(response.get("chunks_received"))
+            acknowledged_total = int(response.get("chunk_count"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("RNS report acknowledgement is missing chunk progress") from exc
+        if acknowledged_index != int(envelope["chunk_index"]):
+            raise ValueError("RNS report acknowledgement has the wrong chunk index")
+        if acknowledged_total != total or not 1 <= acknowledged_count <= total:
+            raise ValueError("RNS report acknowledgement has inconsistent chunk progress")
+        if response.get("complete") is True:
+            if acknowledged_count != total:
+                raise ValueError("RNS report completed without every chunk")
+            return True
+        if response.get("complete") is not False:
+            raise ValueError("RNS report acknowledgement has invalid completion state")
+        return False
 
     def _send_envelope(
         self, link: RNS.Link, envelope: dict[str, Any]

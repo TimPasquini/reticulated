@@ -5,10 +5,12 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sim.live_reports import LiveReportRegistry
 from sim.rns_reporting import (
     RNSReportListener,
+    RNSReportClient,
     decode_report,
     encode_report,
     encode_report_chunks,
@@ -165,6 +167,8 @@ class RNSReportingTests(unittest.TestCase):
                 SimpleNamespace(hash=bytes.fromhex(identity_hash)), 0,
             )
             self.assertTrue(response["ok"])
+            self.assertEqual(response["transfer_id"], chunk["transfer_id"])
+            self.assertEqual(response["chunk_index"], index)
             if index < len(chunks) - 1:
                 self.assertFalse(response["complete"])
                 self.assertEqual(registry.list(), [])
@@ -172,6 +176,65 @@ class RNSReportingTests(unittest.TestCase):
         self.assertEqual(registry.list()[0]["id"], "fedora")
         stored = registry.get("fedora", include_paths=True)
         self.assertEqual(len(stored["destinations"]), 2000)
+
+    def test_client_retries_an_incomplete_transfer_and_requires_final_commit(self):
+        client = RNSReportClient(
+            destination_hash="ab" * 16,
+            identity_path="unused",
+        )
+        client.identity = SimpleNamespace(hash=bytes.fromhex("cd" * 16))
+        links = []
+        client._ensure_link = lambda: links.append(object()) or links[-1]
+        envelopes = [
+            {
+                "encoding": "gzip-json-chunk",
+                "reporter_id": "fedora",
+                "transfer_id": "ef" * 32,
+                "chunk_index": index,
+                "chunk_count": 2,
+            }
+            for index in range(2)
+        ]
+        calls = []
+
+        def send(_link, envelope):
+            calls.append(envelope["chunk_index"])
+            second_attempt = len(calls) > len(envelopes)
+            return {
+                "ok": True,
+                "reporter_id": "fedora",
+                "transfer_id": envelope["transfer_id"],
+                "chunk_index": envelope["chunk_index"],
+                "chunk_count": 2,
+                "chunks_received": envelope["chunk_index"] + 1,
+                "complete": second_attempt and envelope["chunk_index"] == 1,
+            }
+
+        client._send_envelope = send
+        with patch("sim.rns_reporting.encode_report_chunks", return_value=envelopes):
+            response = client.send_report("fedora", "Fedora", snapshot())
+
+        self.assertTrue(response["complete"])
+        self.assertEqual(calls, [0, 1, 0, 1])
+        self.assertEqual(len(links), 2)
+
+    def test_client_never_reports_success_without_server_installation(self):
+        client = RNSReportClient(
+            destination_hash="ab" * 16,
+            identity_path="unused",
+        )
+        client.identity = SimpleNamespace(hash=bytes.fromhex("cd" * 16))
+        client._ensure_link = lambda: object()
+        envelope = encode_report("fedora", "Fedora", snapshot())
+        client._send_envelope = lambda _link, _envelope: {
+            "ok": True,
+            "reporter_id": "fedora",
+            "complete": False,
+        }
+
+        with patch("sim.rns_reporting.encode_report_chunks", return_value=[envelope]):
+            with self.assertRaisesRegex(ValueError, "not installed"):
+                client.send_report("fedora", "Fedora", snapshot())
 
 
 if __name__ == "__main__":
