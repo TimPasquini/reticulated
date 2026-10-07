@@ -5,7 +5,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sim.live_reports import LiveReportRegistry
 from sim.rns_reporting import (
@@ -34,6 +34,25 @@ def snapshot():
 
 
 class RNSReportingTests(unittest.TestCase):
+    def test_listener_does_not_announce_ingest_destination_by_default(self):
+        listener = RNSReportListener(
+            LiveReportRegistry(),
+            identity_path="unused",
+            allowlist_path="unused",
+            local_reporter_id="patroon",
+        )
+        destination = Mock()
+        destination.hash = bytes.fromhex("ab" * 16)
+        with (
+            patch("sim.rns_reporting.load_allowlist", return_value={}),
+            patch("sim.rns_reporting.load_or_create_identity", return_value=Mock()),
+            patch("sim.rns_reporting.RNS.Reticulum"),
+            patch("sim.rns_reporting.RNS.Destination", return_value=destination),
+        ):
+            listener.start()
+
+        destination.announce.assert_not_called()
+
     def test_listener_initialization_stays_on_event_loop_thread(self):
         caller_thread = threading.get_ident()
 
